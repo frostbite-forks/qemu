@@ -30,6 +30,7 @@ jobs:
         run: |
           brew update --quiet
           brew install ninja pkg-config glib pixman python3 gettext libslirp
+          pip3 install --break-system-packages distlib
 
       - name: Configure
         run: |
