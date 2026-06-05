@@ -19,7 +19,7 @@ jobs:
       - name: Install Homebrew dependencies
         run: |
           brew update --quiet
-          brew install ninja pkg-config glib pixman python3 gettext
+          brew install ninja pkg-config glib pixman python3 gettext libslirp
 
       - name: Configure
         run: |
@@ -31,6 +31,7 @@ jobs:
             --disable-sdl \
             --disable-opengl \
             --enable-virtfs \
+            --enable-slirp \
             --audio-drv-list=coreaudio
 
       - name: Build
