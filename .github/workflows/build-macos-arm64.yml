@@ -21,15 +21,6 @@ jobs:
           brew update --quiet
           brew install ninja pkg-config glib pixman python3 gettext
 
-      - name: Stub missing Carbon tools (Rez / SetFile removed in Xcode 13+)
-        run: |
-          for tool in Rez SetFile; do
-            if ! command -v "$tool" >/dev/null 2>&1; then
-              printf '#!/bin/sh\nexit 0\n' | sudo tee /usr/local/bin/"$tool" > /dev/null
-              sudo chmod +x /usr/local/bin/"$tool"
-            fi
-          done
-
       - name: Configure
         run: |
           ./configure \
@@ -44,6 +35,13 @@ jobs:
 
       - name: Build
         run: ninja -C build -j$(sysctl -n hw.logicalcpu)
+
+      - name: Resolve binary (fallback if entitlement.sh skipped icon embed)
+        run: |
+          if [ ! -f build/qemu-system-ppc ] && [ -f build/qemu-system-ppc-unsigned ]; then
+            cp build/qemu-system-ppc-unsigned build/qemu-system-ppc
+          fi
+          ls -lh build/qemu-system-ppc
 
       - name: Smoke test
         run: build/qemu-system-ppc --version
