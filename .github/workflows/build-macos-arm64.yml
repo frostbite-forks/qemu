@@ -14,8 +14,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: v10.0.2
           fetch-depth: 1
+
+      - name: Pin source to QEMU v10.0.2
+        run: |
+          git remote add upstream https://github.com/qemu/qemu.git
+          git fetch --depth=1 upstream tag v10.0.2
+          git checkout v10.0.2
+
+      - name: Patch entitlement.sh (Rez/SetFile absent on macOS 14 CI)
+        run: |
+          sed -i '' -e '/^Rez /s/$/ || true/' -e '/^SetFile /s/$/ || true/' scripts/entitlement.sh
 
       - name: Install Homebrew dependencies
         run: |
