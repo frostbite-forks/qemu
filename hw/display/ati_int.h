@@ -123,7 +123,6 @@ struct ATIVGAState {
     MemoryRegion linear_aper;
     MemoryRegion io;
     MemoryRegion mm;
-    MemoryRegion vbe_compat;
     ATIVGARegs regs;
     ATIHostDataState host_data;
 };

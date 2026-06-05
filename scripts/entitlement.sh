@@ -25,9 +25,9 @@ if test -n "$ENTITLEMENT"; then
   codesign --entitlements "$ENTITLEMENT" --force -s - "$SRC"
 fi
 
-# Add the QEMU icon to the binary on Mac OS (Rez/SetFile absent in CI is non-fatal)
-Rez -append "$ICON" -o "$SRC" || true
-SetFile -a C "$SRC" || true
+# Add the QEMU icon to the binary on Mac OS
+Rez -append "$ICON" -o "$SRC"
+SetFile -a C "$SRC"
 
 mv -f "$SRC" "$DST"
 trap '' exit

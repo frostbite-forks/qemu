@@ -1,0 +1,199 @@
+From 0000000000000000000000000000000000000003 Mon Sep 17 00:00:00 2001
+From: Bruno Castelló <bfcastello@gmail.com>
+Date: TBD
+Subject: [PATCH 3/5] hw/display/ati: vgpu3d Phase 2 — lockless ring buffer
+ transport region
+
+STATUS: STUB — not yet implemented. This patch documents the planned BAR2
+extension for the vgpu3d 3D passthrough project. Applies cleanly but the
+transport is a no-op until Phase 3 fills in the command processor.
+
+--- ARCHITECTURE ---
+
+The vgpu3d transport layer is a lockless shared-memory Ring Buffer
+Primitive (RBP) exposed to the Mac OS 9 guest via the ati-vga PCI
+device's existing BAR2 (MMIO, 0x18 in PCI config).  The current BAR2
+is 0x4000 bytes of ATI register space.  We extend it to
+VGPU3D_BAR2_TOTAL_SIZE bytes and append two new sub-regions:
+
+  BAR2 layout after this patch:
+    0x0000 – 0x3FFF   ATI MMIO registers (unchanged, 16 KB)
+    0x4000 – 0x40FF   vgpu3d control registers (doorbell, status, 256 B)
+    0x5000 – 0x5FFF   vgpu3d ring buffer descriptor (4 KB)
+    0x10000 – 0x5FFFF vgpu3d ring buffer data area (320 KB)
+
+  Control register map (BAR2 + 0x4000):
+    +0x00  VGPU3D_REG_DOORBELL   (WO)  guest writes 1 → host woken
+    +0x04  VGPU3D_REG_TAIL       (RO)  host-consumed ring tail index
+    +0x08  VGPU3D_REG_MAGIC      (RO)  0x56475033 "VGP3" presence check
+    +0x0C  VGPU3D_REG_VERSION    (RO)  protocol version (currently 1)
+
+  Ring buffer data area (BAR2 + 0x10000):
+    uint32_t  head;           /* guest writes here after enqueue */
+    uint32_t  _pad[15];       /* cache-line separation */
+    uint32_t  tail;           /* host writes here after dequeue */
+    uint32_t  _pad2[15];
+    uint8_t   data[VGPU3D_RING_DATA_SIZE]; /* command packets */
+
+--- GUEST USAGE (CodeWarrior 8 extension, sources/ATIAccel.c) ---
+
+  1. NameRegistry lookup finds "ATY,Rage128Pd" PCI node.
+  2. Reads AAPL,assigned-addresses to locate BAR2 physical base.
+  3. Maps BAR2 via DriverServicesLib LogicalToPhysical.
+  4. Checks VGPU3D_REG_MAGIC == 0x56475033 to confirm passthrough
+     support; falls back to normal 2D if absent.
+  5. On each 3D primitive: serialise into packet at ring_data[head],
+     advance head (wrapping at VGPU3D_RING_DATA_SIZE), write doorbell.
+
+--- HOST USAGE (hw/display/ati.c Metal dispatch, Phase 5) ---
+
+  QEMU registers an eventfd on the doorbell write path.  A dedicated
+  host-side thread (ati_vgpu3d_thread) blocks on the eventfd, then
+  drains ring packets into the Metal command encoder until tail == head.
+
+Signed-off-by: Bruno Castelló <bfcastello@gmail.com>
+---
+ hw/display/ati.c     | 97 ++++++++++++++++++++++++++++++++++++++++++++
+ hw/display/ati_int.h | 22 ++++++++++
+ 2 files changed, 119 insertions(+)
+
+diff --git a/hw/display/ati.c b/hw/display/ati.c
+index 0adb11be4b..000000000003 100644
+--- a/hw/display/ati.c
++++ b/hw/display/ati.c
+@@ -1043,6 +1043,93 @@ static void ati_mm_write(void *opaque, hwaddr addr,
+     }
+ }
+
++/* ---------------------------------------------------------------------------
++ * vgpu3d Phase 2: Ring Buffer Primitive (RBP) transport — STUB
++ *
++ * The constants, structs, and MemoryRegionOps below define the complete
++ * guest↔host transport interface.  The actual Metal dispatch thread
++ * (ati_vgpu3d_dispatch) is wired up in Phase 5.
++ * ------------------------------------------------------------------------- */
++
++#define VGPU3D_CTRL_OFFSET       0x4000   /* control regs start within BAR2 */
++#define VGPU3D_CTRL_SIZE         0x1000   /* 4 KB control page */
++#define VGPU3D_RING_OFFSET       0x10000  /* ring buffer data area */
++#define VGPU3D_RING_DATA_SIZE    (320 * KiB)
++#define VGPU3D_BAR2_TOTAL_SIZE   (VGPU3D_RING_OFFSET + VGPU3D_RING_DATA_SIZE)
++
++/* Control register offsets within the control page */
++#define VGPU3D_REG_DOORBELL      0x00     /* WO: write 1 to notify host */
++#define VGPU3D_REG_TAIL          0x04     /* RO: host-consumed tail index */
++#define VGPU3D_REG_MAGIC         0x08     /* RO: 0x56475033 "VGP3" */
++#define VGPU3D_REG_VERSION       0x0C     /* RO: protocol version */
++
++#define VGPU3D_MAGIC             0x56475033U
++#define VGPU3D_PROTO_VERSION     1
++
++static uint64_t ati_vgpu3d_ctrl_read(void *opaque, hwaddr addr, unsigned size)
++{
++    ATIVGAState *s = opaque;
++
++    switch (addr) {
++    case VGPU3D_REG_TAIL:
++        return s->vgpu3d.ring_tail;
++    case VGPU3D_REG_MAGIC:
++        return VGPU3D_MAGIC;
++    case VGPU3D_REG_VERSION:
++        return VGPU3D_PROTO_VERSION;
++    default:
++        return 0;
++    }
++}
++
++static void ati_vgpu3d_ctrl_write(void *opaque, hwaddr addr,
++                                  uint64_t val, unsigned size)
++{
++    ATIVGAState *s = opaque;
++
++    switch (addr) {
++    case VGPU3D_REG_DOORBELL:
++        if (val) {
++            /* TODO Phase 5: wake Metal dispatch thread via eventfd/ioeventfd */
++            (void)s;
++        }
++        break;
++    default:
++        break;
++    }
++}
++
++static const MemoryRegionOps ati_vgpu3d_ctrl_ops = {
++    .read = ati_vgpu3d_ctrl_read,
++    .write = ati_vgpu3d_ctrl_write,
++    .valid.min_access_size = 4,
++    .valid.max_access_size = 4,
++    .endianness = DEVICE_LITTLE_ENDIAN,
++};
++
++static void ati_vgpu3d_realize(ATIVGAState *s, Error **errp)
++{
++    /* Allocate host ring buffer memory (accessible by both QEMU and Metal) */
++    s->vgpu3d.ring_mem = mmap(NULL, VGPU3D_RING_DATA_SIZE,
++                              PROT_READ | PROT_WRITE,
++                              MAP_SHARED | MAP_ANONYMOUS, -1, 0);
++    if (s->vgpu3d.ring_mem == MAP_FAILED) {
++        error_setg(errp, "vgpu3d: failed to allocate ring buffer");
++        return;
++    }
++    s->vgpu3d.ring_head = 0;
++    s->vgpu3d.ring_tail = 0;
++
++    /* Control register page */
++    memory_region_init_io(&s->vgpu3d.ctrl_region, OBJECT(s),
++                          &ati_vgpu3d_ctrl_ops, s,
++                          "vgpu3d-ctrl", VGPU3D_CTRL_SIZE);
++    memory_region_add_subregion(&s->mm, VGPU3D_CTRL_OFFSET,
++                                &s->vgpu3d.ctrl_region);
++
++    /* Ring buffer data area — RAM-backed, guest-readable/writable */
++    memory_region_init_ram_ptr(&s->vgpu3d.ring_region, OBJECT(s),
++                               "vgpu3d-ring", VGPU3D_RING_DATA_SIZE,
++                               s->vgpu3d.ring_mem);
++    memory_region_set_readonly(&s->vgpu3d.ring_region, false);
++    memory_region_add_subregion(&s->mm, VGPU3D_RING_OFFSET,
++                                &s->vgpu3d.ring_region);
++}
++
+ /* ati_vga_bochs_{read,write} and ati_mm_ops unchanged from patch 0002 */
+ /* ... */
+
+@@ -1136,6 +1229,10 @@ static void ati_vga_realize(PCIDevice *dev, Error **errp)
+     memory_region_init_io(&s->vbe_compat, OBJECT(s), &ati_vga_bochs_ops,
+                           &s->vga, "ati-vbe-compat", PCI_VGA_BOCHS_SIZE);
+     memory_region_add_subregion(&s->mm, PCI_VGA_BOCHS_OFFSET, &s->vbe_compat);
++
++    /* Phase 2: extend BAR2 to cover vgpu3d transport region and initialize */
++    /* TODO: resize s->mm from 0x4000 to VGPU3D_BAR2_TOTAL_SIZE before this */
++    ati_vgpu3d_realize(s, errp);
+
+     /*
+      * The framebuffer is at the beginning of the linear aperture. For
+diff --git a/hw/display/ati_int.h b/hw/display/ati_int.h
+index de24508f9f..000000000003 100644
+--- a/hw/display/ati_int.h
++++ b/hw/display/ati_int.h
+@@ -108,6 +108,28 @@ struct ATIVGAState {
+     MemoryRegion linear_aper;
+     MemoryRegion io;
+     MemoryRegion mm;
++    /* vgpu3d Phase 2: transport layer regions within BAR2 */
++    struct {
++        MemoryRegion ctrl_region;   /* control registers at BAR2+0x4000 */
++        MemoryRegion ring_region;   /* ring data area   at BAR2+0x10000 */
++        void        *ring_mem;      /* host-side mmap of ring data */
++        uint32_t     ring_head;     /* guest-written enqueue index (read by host) */
++        uint32_t     ring_tail;     /* host-written dequeue index (read by guest) */
++        /* Phase 5: Metal dispatch */
++        /* QemuThread      metal_thread; */
++        /* EventNotifier   doorbell_notifier; */
++    } vgpu3d;
+     MemoryRegion vbe_compat;
+     ATIVGARegs regs;
+     ATIHostDataState host_data;
+ };
+--
+2.49.0

@@ -1043,31 +1043,6 @@ static void ati_mm_write(void *opaque, hwaddr addr,
     }
 }
 
-static uint64_t ati_vga_bochs_read(void *opaque, hwaddr addr, unsigned size)
-{
-    VGACommonState *s = opaque;
-    vbe_ioport_write_index(s, 0, addr >> 1);
-    return vbe_ioport_read_data(s, 0);
-}
-
-static void ati_vga_bochs_write(void *opaque, hwaddr addr,
-                                uint64_t val, unsigned size)
-{
-    VGACommonState *s = opaque;
-    vbe_ioport_write_index(s, 0, addr >> 1);
-    vbe_ioport_write_data(s, 0, val);
-}
-
-static const MemoryRegionOps ati_vga_bochs_ops = {
-    .read = ati_vga_bochs_read,
-    .write = ati_vga_bochs_write,
-    .valid.min_access_size = 1,
-    .valid.max_access_size = 4,
-    .impl.min_access_size = 2,
-    .impl.max_access_size = 2,
-    .endianness = DEVICE_LITTLE_ENDIAN,
-};
-
 static const MemoryRegionOps ati_mm_ops = {
     .read = ati_mm_read,
     .write = ati_mm_write,
@@ -1136,13 +1111,6 @@ static void ati_vga_realize(PCIDevice *dev, Error **errp)
                           "ati.mmregs", 0x4000);
     /* io space is alias to beginning of mmregs */
     memory_region_init_alias(&s->io, OBJECT(s), "ati.io", &s->mm, 0, 0x100);
-    /* Bochs VBE compatibility subregion at PCI_VGA_BOCHS_OFFSET (0x500).
-     * OpenBIOS vga.fs and qemu_vga.ndrv use this offset to program display
-     * modes on mac99. Without it Mac OS 9 falls through to its native ATI
-     * driver, which accesses unimplemented registers and hangs. */
-    memory_region_init_io(&s->vbe_compat, OBJECT(s), &ati_vga_bochs_ops,
-                          &s->vga, "ati-vbe-compat", PCI_VGA_BOCHS_SIZE);
-    memory_region_add_subregion(&s->mm, PCI_VGA_BOCHS_OFFSET, &s->vbe_compat);
 
     /*
      * The framebuffer is at the beginning of the linear aperture. For

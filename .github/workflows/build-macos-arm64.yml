@@ -16,9 +16,10 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Patch entitlement.sh (Rez/SetFile absent on macOS 14 CI)
+      - name: Apply vgpu3d patches
         run: |
-          sed -i '' -e '/^Rez /s/$/ || true/' -e '/^SetFile /s/$/ || true/' scripts/entitlement.sh
+          git apply patches/0001-scripts-entitlement-make-Rez-SetFile-non-fatal.patch
+          git apply patches/0002-hw-display-ati-add-Bochs-VBE-compat-for-mac99-OpenBIOS.patch
 
       - name: Install Homebrew dependencies
         run: |
