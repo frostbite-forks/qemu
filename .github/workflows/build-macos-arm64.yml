@@ -16,12 +16,6 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Pin source to QEMU v10.0.2
-        run: |
-          git remote add upstream https://github.com/qemu/qemu.git
-          git fetch --depth=1 upstream tag v10.0.2
-          git checkout v10.0.2
-
       - name: Patch entitlement.sh (Rez/SetFile absent on macOS 14 CI)
         run: |
           sed -i '' -e '/^Rez /s/$/ || true/' -e '/^SetFile /s/$/ || true/' scripts/entitlement.sh
@@ -65,6 +59,7 @@ jobs:
           find pc-bios -maxdepth 1 -type f \( \
             -name '*.bin' -o -name '*.rom' -o -name '*.img' -o \
             -name '*.elf' -o -name '*.dtb' -o -name '*.fd'  -o \
+            -name '*.ndrv' -o \
             -name 'openbios-*' -o -name 'u-boot*' \
           \) -exec cp {} dist/share/qemu/ \;
 
