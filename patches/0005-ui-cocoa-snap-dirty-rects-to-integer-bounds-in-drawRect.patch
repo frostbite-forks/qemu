@@ -1,0 +1,67 @@
+From 0000000000000000000000000000000000000005 Mon Sep 17 00:00:00 2001
+From: Bruno Castelló <bfcastello@gmail.com>
+Date: 2026-06-05
+Subject: [PATCH 5/5] ui/cocoa: snap dirty rects to integer pixel bounds in drawRect
+
+At non-integer display scale factors (e.g. a 1680x1050 guest framebuffer
+displayed full-screen on an M4 Pro 14" at 1.8x physical pixels), macOS
+converts dirty rects passed to setNeedsDisplayInRect: to backing pixel
+coordinates and back, which can produce fractional bounds coordinates (e.g.
+width 51.11 instead of 51) whenever dirty rect dimensions are not exact
+multiples of the scale factor.
+
+CGImageCreateWithImageInRect with a fractional clipRect then samples the
+guest framebuffer at sub-pixel offsets, and CGContextDrawImage places the
+tile at a sub-pixel destination — both produce visible pixel-level artefacts.
+The artefacts are most noticeable when the cursor moves, because each move
+triggers a series of small dirty-rect redraws.
+
+Fix: snap each dirty rect to integer guest-pixel (bounds) coordinates with
+floor/ceil before using it as the CGImage clip rect and draw destination.
+
+Signed-off-by: Bruno Castelló <bfcastello@gmail.com>
+---
+ ui/cocoa.m | 20 +++++++++++++-------
+ 1 file changed, 13 insertions(+), 7 deletions(-)
+
+diff --git a/ui/cocoa.m b/ui/cocoa.m
+index 0000000000000000..0000000000000001 100644
+--- a/ui/cocoa.m
++++ b/ui/cocoa.m
+@@ -558,17 +558,25 @@ static CGInterpolationQuality zoom_interpolation = kCGInterpolationNone;
+         CGImageRef clipImageRef;
+         CGRect clipRect;
+
+-        [self getRectsBeingDrawn:&rectList count:&rectCount];
+-        for (i = 0; i < rectCount; i++) {
+-            clipRect = rectList[i];
+-            clipRect.origin.y = (float)h - (clipRect.origin.y + clipRect.size.height);
+-            clipImageRef = CGImageCreateWithImageInRect(
+-                                                        imageRef,
+-                                                        clipRect
+-                                                        );
+-            CGContextDrawImage (viewContextRef, cgrect(rectList[i]), clipImageRef);
+-            CGImageRelease (clipImageRef);
+-        }
++        [self getRectsBeingDrawn:&rectList count:&rectCount];
++        for (i = 0; i < rectCount; i++) {
++            /* Non-integer display scale makes getRectsBeingDrawn return fractional
++             * bounds coords; snap to integers to avoid sub-pixel CGImage artifacts. */
++            CGFloat x0 = floor(rectList[i].origin.x);
++            CGFloat y0 = floor(rectList[i].origin.y);
++            CGFloat x1 = ceil(rectList[i].origin.x + rectList[i].size.width);
++            CGFloat y1 = ceil(rectList[i].origin.y + rectList[i].size.height);
++            if (x0 < 0)  { x0 = 0; }
++            if (y0 < 0)  { y0 = 0; }
++            if (x1 > w)  { x1 = w; }
++            if (y1 > h)  { y1 = h; }
++            clipRect = CGRectMake(x0, (CGFloat)h - y1, x1 - x0, y1 - y0);
++            clipImageRef = CGImageCreateWithImageInRect(imageRef, clipRect);
++            CGContextDrawImage(viewContextRef,
++                               CGRectMake(x0, y0, x1 - x0, y1 - y0),
++                               clipImageRef);
++            CGImageRelease(clipImageRef);
++        }
+         CGImageRelease (imageRef);
+         CGDataProviderRelease(dataProviderRef);
+     }
