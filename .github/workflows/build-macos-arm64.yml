@@ -21,6 +21,7 @@ jobs:
           git apply patches/0001-scripts-entitlement-make-Rez-SetFile-non-fatal.patch
           git apply patches/0002-hw-display-ati-add-Bochs-VBE-compat-for-mac99-OpenBIOS.patch
           git apply patches/0005-ui-cocoa-snap-dirty-rects-to-integer-bounds-in-drawRect.patch
+          git apply patches/0003-hw-display-ati-vgpu3d-phase2-ring-buffer-transport.patch
 
       - name: Install Homebrew dependencies
         run: |
