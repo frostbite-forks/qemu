@@ -58,7 +58,7 @@ index 0adb11be4b..000000000003 100644
 +#define VGPU3D_CTRL_SIZE         0x1000   /* 4 KB control page */
 +#define VGPU3D_RING_OFFSET       0x10000  /* ring buffer data area */
 +#define VGPU3D_RING_DATA_SIZE    (320 * KiB)
-+#define VGPU3D_BAR2_TOTAL_SIZE   (VGPU3D_RING_OFFSET + VGPU3D_RING_DATA_SIZE)
++#define VGPU3D_BAR2_TOTAL_SIZE   (512 * KiB)   /* must be power of 2 for pci_register_bar */
 +
 +/* Control register offsets within the control page */
 +#define VGPU3D_REG_DOORBELL      0x00     /* WO: write 1 to notify host */
