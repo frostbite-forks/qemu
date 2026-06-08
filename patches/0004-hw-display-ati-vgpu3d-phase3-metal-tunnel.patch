@@ -1,0 +1,310 @@
+diff --git a/hw/display/ati_vgpu3d.h b/hw/display/ati_vgpu3d.h
+new file mode 100644
+index 0000000000..8a45f4fffe
+--- /dev/null
++++ b/hw/display/ati_vgpu3d.h
+@@ -0,0 +1,194 @@
++/*
++ * ati_vgpu3d.h — vgpu3d wire protocol v1
++ *
++ * Shared contract between the Mac OS 9 guest CFM extension (sources/) and
++ * the QEMU Metal dispatch thread (ati_metal.m).
++ *
++ * Byte order: BIG-ENDIAN throughout (PPC-native).
++ * Host reads use be32_to_cpu() / be16_to_cpu() / be_floats_to_cpu().
++ * Guest writes naturally with PPC big-endian stores — no byte-swap needed.
++ *
++ * Ring buffer layout (BAR2 + VGPU3D_RING_OFFSET, i.e. BAR2+0x10000):
++ *
++ *   +0x00  uint32_t head     guest enqueue ptr  (byte offset into data[])
++ *   +0x04  uint32_t _pad[15] cache-line fill    (64 bytes total)
++ *   +0x40  uint32_t tail     host dequeue ptr   (byte offset into data[])
++ *   +0x44  uint32_t _pad[15] cache-line fill
++ *   +0x80  uint8_t  data[]   packet stream starts here
++ *
++ * head and tail are byte offsets into data[], wrapping at VGPU3D_RING_CAP.
++ * Ring is empty when head == tail.
++ * All packets start at 8-byte-aligned offsets within data[].
++ * Wrap: if a packet does not fit before VGPU3D_RING_CAP, the writer emits
++ * a PKT_NOP spanning the remaining bytes, then wraps head to 0.
++ */
++
++#ifndef ATI_VGPU3D_H
++#define ATI_VGPU3D_H
++
++#include <stdint.h>
++
++/* ---- Ring layout --------------------------------------------------------- */
++#define VGPU3D_RING_HEAD_OFF    0x00u
++#define VGPU3D_RING_TAIL_OFF    0x40u
++#define VGPU3D_RING_DATA_OFF    0x80u
++/* Ring capacity = total region size minus the head/tail overhead.
++ * VGPU3D_RING_DATA_SIZE is defined in ati.c as (320 * KiB); replicate here
++ * as a literal so this header is self-contained for the guest build too. */
++#define VGPU3D_RING_BYTES       (320u * 1024u)
++#define VGPU3D_RING_CAP         (VGPU3D_RING_BYTES - VGPU3D_RING_DATA_OFF)
++
++/* ---- Packet types -------------------------------------------------------- */
++#define VGPU3D_PKT_NOP          0x0000u  /* padding / wrap sentinel          */
++#define VGPU3D_PKT_DRAW_TRIS    0x0001u  /* Gouraud triangles (screen space) */
++#define VGPU3D_PKT_DRAW_TEX     0x0002u  /* textured triangles               */
++#define VGPU3D_PKT_UPLOAD_TEX   0x0003u  /* upload texture to host cache     */
++#define VGPU3D_PKT_FREE_TEX     0x0004u  /* release texture handle           */
++#define VGPU3D_PKT_SET_VIEWPORT 0x0005u  /* notify host of screen dimensions */
++#define VGPU3D_PKT_PRESENT      0x0006u  /* end of frame — trigger render    */
++
++/* ---- Packet header (8 bytes, 8-byte aligned) ----------------------------- */
++typedef struct {
++    uint16_t type;  /* VGPU3D_PKT_*                                     */
++    uint16_t len;   /* total byte length of packet incl. header,        */
++                    /* rounded up to next 8-byte boundary                */
++    uint32_t seq;   /* monotonic guest sequence number (debug/sync)     */
++} vgpu3d_pkt_hdr;   /* big-endian */
++
++/* ---- PKT_DRAW_TRIS ------------------------------------------------------- */
++/*
++ * Gouraud-shaded triangle list.  Vertices are in RAVE screen space:
++ *   x, y  = screen pixels (origin top-left, y increases downward)
++ *   z     = depth [0.0 = near plane, 1.0 = far plane]
++ *   r,g,b,a = RGBA color components [0.0 .. 1.0]
++ *   fog   = fog factor [1.0 = no fog, 0.0 = fully fogged] — reserved v1
++ *
++ * vertex_count must be a multiple of 3.
++ * Packet length = sizeof(vgpu3d_pkt_draw_tris) +
++ *                 vertex_count * sizeof(vgpu3d_vtx_gouraud),
++ * rounded up to 8 bytes.
++ */
++typedef struct {
++    float x, y, z;
++    float r, g, b, a;
++    float fog;
++} vgpu3d_vtx_gouraud;   /* 36 bytes */
++
++typedef struct {
++    vgpu3d_pkt_hdr hdr;
++    uint16_t       vertex_count;
++    uint16_t       _pad;
++    /* vgpu3d_vtx_gouraud verts[vertex_count] follow immediately */
++} vgpu3d_pkt_draw_tris;  /* 12 bytes fixed */
++
++/* ---- PKT_DRAW_TEX -------------------------------------------------------- */
++/*
++ * Perspective-correct textured triangle list.
++ *   x, y    = screen pixels
++ *   z       = depth [0.0..1.0]
++ *   uOverW  = U/W  (RAVE TQAVTexture layout)
++ *   vOverW  = V/W
++ *   invW    = 1/W  — Metal shader reconstructs u = uOverW/invW
++ *   fog     = reserved v1
++ *
++ * vertex_count must be a multiple of 3.
++ */
++typedef struct {
++    float x, y, z;
++    float uOverW, vOverW, invW;
++    float fog;
++} vgpu3d_vtx_tex;        /* 28 bytes */
++
++typedef struct {
++    vgpu3d_pkt_hdr hdr;
++    uint32_t       tex_id;        /* handle from PKT_UPLOAD_TEX            */
++    uint16_t       vertex_count;
++    uint16_t       _pad;
++    /* vgpu3d_vtx_tex verts[vertex_count] follow immediately */
++} vgpu3d_pkt_draw_tex;   /* 16 bytes fixed */
++
++/* ---- PKT_UPLOAD_TEX ------------------------------------------------------ */
++#define VGPU3D_TEX_FMT_ARGB1555  0u
++#define VGPU3D_TEX_FMT_ARGB32    1u
++#define VGPU3D_TEX_FMT_RGB565    2u
++
++typedef struct {
++    vgpu3d_pkt_hdr hdr;
++    uint32_t       tex_id;    /* guest-assigned handle [1..VGPU3D_TEX_MAX] */
++    uint16_t       width;
++    uint16_t       height;
++    uint8_t        format;    /* VGPU3D_TEX_FMT_*                          */
++    uint8_t        _pad[3];
++    /* texel data: width * height * bytes_per_pixel follow immediately     */
++} vgpu3d_pkt_upload_tex; /* 20 bytes fixed */
++
++#define VGPU3D_TEX_MAX  256u
++
++/* ---- PKT_FREE_TEX -------------------------------------------------------- */
++typedef struct {
++    vgpu3d_pkt_hdr hdr;
++    uint32_t       tex_id;
++} vgpu3d_pkt_free_tex;   /* 12 bytes */
++
++/* ---- PKT_SET_VIEWPORT ---------------------------------------------------- */
++typedef struct {
++    vgpu3d_pkt_hdr hdr;
++    uint16_t       width;
++    uint16_t       height;
++} vgpu3d_pkt_set_viewport; /* 12 bytes */
++
++/* ---- PKT_PRESENT --------------------------------------------------------- */
++/* No payload beyond hdr. Host renders all queued draw calls and presents. */
++
++/* ---- Host-side ring accessors (QEMU C, not compiled in guest) ----------- */
++#ifndef VGPU3D_GUEST_BUILD
++
++#include "qemu/bswap.h"
++
++static inline uint32_t vgpu3d_ring_head(const void *ring_mem)
++{
++    const uint32_t *p = (const uint32_t *)ring_mem;
++    return be32_to_cpu(p[0]);
++}
++
++static inline uint32_t vgpu3d_ring_tail(const void *ring_mem)
++{
++    const uint32_t *p =
++        (const uint32_t *)((const uint8_t *)ring_mem + VGPU3D_RING_TAIL_OFF);
++    return be32_to_cpu(p[0]);
++}
++
++static inline void vgpu3d_ring_set_tail(void *ring_mem, uint32_t tail)
++{
++    uint32_t *p =
++        (uint32_t *)((uint8_t *)ring_mem + VGPU3D_RING_TAIL_OFF);
++    p[0] = cpu_to_be32(tail);
++}
++
++static inline uint8_t *vgpu3d_ring_data(void *ring_mem)
++{
++    return (uint8_t *)ring_mem + VGPU3D_RING_DATA_OFF;
++}
++
++/* Peek at the packet header at ring data offset 'off'. */
++static inline const vgpu3d_pkt_hdr *
++vgpu3d_pkt_at(const void *ring_mem, uint32_t off)
++{
++    const uint8_t *data =
++        (const uint8_t *)ring_mem + VGPU3D_RING_DATA_OFF;
++    return (const vgpu3d_pkt_hdr *)(data + off);
++}
++
++/* Advance offset by pkt->len, wrapping at VGPU3D_RING_CAP. */
++static inline uint32_t vgpu3d_pkt_next(uint32_t off, uint16_t pkt_len)
++{
++    uint32_t next = off + be16_to_cpu(pkt_len);
++    if (next >= VGPU3D_RING_CAP) {
++        next = 0;
++    }
++    return next;
++}
++
++#endif /* VGPU3D_GUEST_BUILD */
++
++#endif /* ATI_VGPU3D_H */
+\ No newline at end of file
+diff --git a/hw/display/ati.c b/hw/display/ati.c
+index 229b76cf53..6691c52ab1 100644
+--- a/hw/display/ati.c
++++ b/hw/display/ati.c
+@@ -19,6 +19,9 @@
+ #include "qemu/osdep.h"
+ #include "ati_int.h"
+ #include "ati_regs.h"
++#include "ati_vgpu3d.h"
++#include "qemu/thread.h"
++#include "qemu/event_notifier.h"
+ #include "vga-access.h"
+ #include "hw/core/qdev-properties.h"
+ #include "vga_regs.h"
+@@ -1121,8 +1124,7 @@ static void ati_vgpu3d_ctrl_write(void *opaque, hwaddr addr,
+     switch (addr) {
+     case VGPU3D_REG_DOORBELL:
+         if (val) {
+-            /* TODO Phase 5: wake Metal dispatch thread via eventfd/ioeventfd */
+-            (void)s;
++            event_notifier_set(&s->vgpu3d.doorbell_notifier);
+         }
+         break;
+     default:
+@@ -1138,6 +1140,34 @@ static const MemoryRegionOps ati_vgpu3d_ctrl_ops = {
+     .endianness = DEVICE_LITTLE_ENDIAN,
+ };
+ 
++/* Forward declarations -- implemented in ati_metal.m (Darwin only). */
++void vgpu3d_metal_init(void *ring_mem);
++void vgpu3d_metal_dispatch(void *ring_mem);
++void vgpu3d_metal_cleanup(void);
++
++static void *ati_vgpu3d_thread(void *opaque)
++{
++    ATIVGAState *s = opaque;
++    int fd = event_notifier_get_fd(&s->vgpu3d.doorbell_notifier);
++
++    while (s->vgpu3d.running) {
++        fd_set rfds;
++        FD_ZERO(&rfds);
++        FD_SET(fd, &rfds);
++        if (select(fd + 1, &rfds, NULL, NULL, NULL) < 0) {
++            break;
++        }
++        if (!event_notifier_test_and_clear(&s->vgpu3d.doorbell_notifier)) {
++            continue;
++        }
++        if (!s->vgpu3d.running) {
++            break;
++        }
++        vgpu3d_metal_dispatch(s->vgpu3d.ring_mem);
++    }
++    return NULL;
++}
++
+ static void ati_vgpu3d_realize(ATIVGAState *s, Error **errp)
+ {
+     s->vgpu3d.ring_mem = mmap(NULL, VGPU3D_RING_DATA_SIZE,
+@@ -1162,6 +1192,16 @@ static void ati_vgpu3d_realize(ATIVGAState *s, Error **errp)
+     memory_region_set_readonly(&s->vgpu3d.ring_region, false);
+     memory_region_add_subregion(&s->mm, VGPU3D_RING_OFFSET,
+                                 &s->vgpu3d.ring_region);
++
++    if (event_notifier_init(&s->vgpu3d.doorbell_notifier, 0) < 0) {
++        error_setg(errp, "vgpu3d: failed to init doorbell notifier");
++        munmap(s->vgpu3d.ring_mem, VGPU3D_RING_DATA_SIZE);
++        return;
++    }
++    vgpu3d_metal_init(s->vgpu3d.ring_mem);
++    s->vgpu3d.running = true;
++    qemu_thread_create(&s->vgpu3d.metal_thread, "vgpu3d-metal",
++                       ati_vgpu3d_thread, s, QEMU_THREAD_JOINABLE);
+ }
+ 
+ static void ati_vga_realize(PCIDevice *dev, Error **errp)
+@@ -1289,6 +1329,15 @@ static void ati_vga_exit(PCIDevice *dev)
+ {
+     ATIVGAState *s = ATI_VGA(dev);
+ 
++    if (s->vgpu3d.running) {
++        s->vgpu3d.running = false;
++        event_notifier_set(&s->vgpu3d.doorbell_notifier);
++        qemu_thread_join(&s->vgpu3d.metal_thread);
++        event_notifier_cleanup(&s->vgpu3d.doorbell_notifier);
++        vgpu3d_metal_cleanup();
++        munmap(s->vgpu3d.ring_mem, VGPU3D_RING_DATA_SIZE);
++    }
++
+     timer_del(&s->vblank_timer);
+     qemu_graphic_console_close(s->vga.con);
+ }
+diff --git a/hw/display/ati_int.h b/hw/display/ati_int.h
+index 18e51ccaa5..c422fee145 100644
+--- a/hw/display/ati_int.h
++++ b/hw/display/ati_int.h
+@@ -129,9 +129,9 @@ struct ATIVGAState {
+         void        *ring_mem;      /* host-side mmap of ring data */
+         uint32_t     ring_head;     /* guest-written enqueue index */
+         uint32_t     ring_tail;     /* host-written dequeue index */
+-        /* Phase 5: Metal dispatch */
+-        /* QemuThread      metal_thread; */
+-        /* EventNotifier   doorbell_notifier; */
++        QemuThread    metal_thread;
++        EventNotifier doorbell_notifier;
++        bool          running;
+     } vgpu3d;
+     MemoryRegion vbe_compat;
+     ATIVGARegs regs;
