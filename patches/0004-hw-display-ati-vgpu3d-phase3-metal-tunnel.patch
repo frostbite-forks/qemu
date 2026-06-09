@@ -149,7 +149,14 @@ index 0000000000..8a45f4fffe
 +/* ---- Host-side ring accessors (QEMU C, not compiled in guest) ----------- */
 +#ifndef VGPU3D_GUEST_BUILD
 +
-+#include "qemu/bswap.h"
++/* be32_to_cpu / be16_to_cpu / cpu_to_be32 come from qemu/osdep.h in ati.c.
++ * In ati_metal.m (Objective-C, no qemu/osdep.h) we fall back to libkern. */
++#ifndef be32_to_cpu
++#include <libkern/OSByteOrder.h>
++#define be32_to_cpu(v)  OSSwapBigToHostInt32(v)
++#define be16_to_cpu(v)  OSSwapBigToHostInt16(v)
++#define cpu_to_be32(v)  OSSwapHostToBigInt32(v)
++#endif
 +
 +static inline uint32_t vgpu3d_ring_head(const void *ring_mem)
 +{
