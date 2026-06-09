@@ -3,7 +3,7 @@ new file mode 100644
 index 0000000000..8a45f4fffe
 --- /dev/null
 +++ b/hw/display/ati_vgpu3d.h
-@@ -0,0 +1,194 @@
+@@ -0,0 +1,201 @@
 +/*
 + * ati_vgpu3d.h — vgpu3d wire protocol v1
 + *
