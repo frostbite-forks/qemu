@@ -1,0 +1,39 @@
+From 922fe86f24beb619bdf59acd7940a23c5d8ea535 Mon Sep 17 00:00:00 2001
+From: Bruno Castelló <bfcastello@gmail.com>
+Date: Fri,  5 Jun 2026 00:38:47 -0300
+Subject: [PATCH 1/5] scripts/entitlement: make Rez/SetFile non-fatal on
+ macOS 12+
+
+Rez and SetFile are Carbon-era developer tools that were removed from
+Xcode Command Line Tools starting with macOS 12 (Monterey). When QEMU
+is built on macOS 14+ CI runners (or modern developer machines), the
+script exits under `set -e` before the final `mv` fires, so the signed
+binary is never produced even though the build itself succeeded.
+
+Make both calls non-fatal with `|| true`. The icon embedding step is
+cosmetic and must not block binary delivery.
+
+Signed-off-by: Bruno Castelló <bfcastello@gmail.com>
+---
+ scripts/entitlement.sh | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/scripts/entitlement.sh b/scripts/entitlement.sh
+index 0f412949ec..a31618c14d 100755
+--- a/scripts/entitlement.sh
++++ b/scripts/entitlement.sh
+@@ -25,9 +25,9 @@ if test -n "$ENTITLEMENT"; then
+   codesign --entitlements "$ENTITLEMENT" --force -s - "$SRC"
+ fi
+
+-# Add the QEMU icon to the binary on Mac OS
+-Rez -append "$ICON" -o "$SRC"
+-SetFile -a C "$SRC"
++# Add the QEMU icon to the binary on Mac OS (Rez/SetFile absent in CI is non-fatal)
++Rez -append "$ICON" -o "$SRC" || true
++SetFile -a C "$SRC" || true
+
+ mv -f "$SRC" "$DST"
+ trap '' exit
+--
+2.49.0

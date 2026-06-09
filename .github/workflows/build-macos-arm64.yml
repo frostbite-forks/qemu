@@ -1,0 +1,76 @@
+name: Build qemu-system-ppc (macOS ARM64)
+
+on:
+  push:
+    branches: [master, main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: qemu-system-ppc / macos-arm64
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Apply vgpu3d patches
+        run: |
+          git apply patches/0001-scripts-entitlement-make-Rez-SetFile-non-fatal.patch
+          git apply patches/0002-hw-display-ati-add-Bochs-VBE-compat-for-mac99-OpenBIOS.patch
+          git apply patches/0005-ui-cocoa-snap-dirty-rects-to-integer-bounds-in-drawRect.patch
+          git apply patches/0003-hw-display-ati-vgpu3d-phase2-ring-buffer-transport.patch
+          git apply patches/0004-hw-display-ati-vgpu3d-phase3-metal-tunnel.patch
+          git apply patches/0006-hw-display-ati-metal-add-Metal-renderer.patch
+
+      - name: Install Homebrew dependencies
+        run: |
+          brew update --quiet
+          brew install ninja pkg-config glib pixman python3 gettext libslirp
+          pip3 install --break-system-packages distlib
+
+      - name: Configure
+        run: |
+          ./configure \
+            --target-list=ppc-softmmu \
+            --disable-werror \
+            --enable-cocoa \
+            --disable-gtk \
+            --disable-sdl \
+            --disable-opengl \
+            --enable-virtfs \
+            --enable-slirp \
+            --audio-drv-list=coreaudio
+
+      - name: Build
+        run: ninja -C build -j$(sysctl -n hw.logicalcpu)
+
+      - name: Resolve binary (fallback if entitlement.sh skipped icon embed)
+        run: |
+          if [ ! -f build/qemu-system-ppc ] && [ -f build/qemu-system-ppc-unsigned ]; then
+            cp build/qemu-system-ppc-unsigned build/qemu-system-ppc
+          fi
+          ls -lh build/qemu-system-ppc
+
+      - name: Smoke test
+        run: build/qemu-system-ppc --version
+
+      - name: Stage distribution layout
+        run: |
+          mkdir -p dist/bin dist/share/qemu
+          cp build/qemu-system-ppc dist/bin/
+          find pc-bios -maxdepth 1 -type f \( \
+            -name '*.bin' -o -name '*.rom' -o -name '*.img' -o \
+            -name '*.elf' -o -name '*.dtb' -o -name '*.fd'  -o \
+            -name '*.ndrv' -o \
+            -name 'openbios-*' -o -name 'u-boot*' \
+          \) -exec cp {} dist/share/qemu/ \;
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: qemu-system-ppc-macos-arm64
+          path: dist/
+          retention-days: 30

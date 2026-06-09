@@ -1,0 +1,38 @@
+From 0000000000000000000000000000000000000006 Mon Sep 17 00:00:00 2001
+From: Bruno Castelló <bfcastello@gmail.com>
+Date: TBD
+Subject: [PATCH 6/6] hw/display/meson: compile ati_metal.m with Metal on Darwin
+
+Conditionally adds ati_metal.m to the softmmu build when CONFIG_ATI_VGA
+is enabled and the host is Darwin. Links the Metal framework only —
+no Cocoa or QuartzCore, since the renderer writes directly into guest
+VRAM via a zero-copy MTLBuffer and never opens a second window.
+
+ati_metal.m and ati_vgpu3d.h live directly in hw/display/ as committed
+project files, not embedded in patches.
+
+Signed-off-by: Bruno Castelló <bfcastello@gmail.com>
+---
+ hw/display/meson.build | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/hw/display/meson.build b/hw/display/meson.build
+index ffecedbf70..d4e1c00000 100644
+--- a/hw/display/meson.build
++++ b/hw/display/meson.build
+@@ -62,6 +62,15 @@ system_ss.add(when: 'CONFIG_ARTIST', if_true: files('artist.c'))
+
+ system_ss.add(when: 'CONFIG_ATI_VGA', if_true: [files('ati.c', 'ati_2d.c', 'ati_dbg.c'), pixman])
+
++if host_machine.system() == 'darwin'
++  metal_fw = dependency('appleframeworks',
++                        modules: ['Metal'],
++                        required: false)
++  if metal_fw.found()
++    system_ss.add(when: 'CONFIG_ATI_VGA', if_true: [files('ati_metal.m'), metal_fw])
++  endif
++endif
++
+ system_ss.add(when: [pvg, 'CONFIG_MAC_PVG_PCI'],     if_true: [files('apple-gfx.m', 'apple-gfx-pci.m')])
+ system_ss.add(when: [pvg, 'CONFIG_MAC_PVG_MMIO'],    if_true: [files('apple-gfx.m', 'apple-gfx-mmio.m')])
+

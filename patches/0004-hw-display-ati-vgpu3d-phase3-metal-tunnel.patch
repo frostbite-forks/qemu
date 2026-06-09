@@ -1,0 +1,109 @@
+diff --git a/hw/display/ati.c b/hw/display/ati.c
+index 229b76cf53..6691c52ab1 100644
+--- a/hw/display/ati.c
++++ b/hw/display/ati.c
+@@ -19,6 +19,9 @@
+ #include "qemu/osdep.h"
+ #include "ati_int.h"
+ #include "ati_regs.h"
++#include "ati_vgpu3d.h"
++#include "qemu/thread.h"
++#include "qemu/event_notifier.h"
+ #include "vga-access.h"
+ #include "hw/core/qdev-properties.h"
+ #include "vga_regs.h"
+@@ -1121,8 +1124,7 @@ static void ati_vgpu3d_ctrl_write(void *opaque, hwaddr addr,
+     switch (addr) {
+     case VGPU3D_REG_DOORBELL:
+         if (val) {
+-            /* TODO Phase 5: wake Metal dispatch thread via eventfd/ioeventfd */
+-            (void)s;
++            event_notifier_set(&s->vgpu3d.doorbell_notifier);
+         }
+         break;
+     default:
+@@ -1138,6 +1140,34 @@ static const MemoryRegionOps ati_vgpu3d_ctrl_ops = {
+     .endianness = DEVICE_LITTLE_ENDIAN,
+ };
+ 
++/* Forward declarations -- implemented in ati_metal.m (Darwin only). */
++void vgpu3d_metal_init(void *ring_mem, void *vram_ptr);
++void vgpu3d_metal_dispatch(void *ring_mem);
++void vgpu3d_metal_cleanup(void);
++
++static void *ati_vgpu3d_thread(void *opaque)
++{
++    ATIVGAState *s = opaque;
++    int fd = event_notifier_get_fd(&s->vgpu3d.doorbell_notifier);
++
++    while (s->vgpu3d.running) {
++        fd_set rfds;
++        FD_ZERO(&rfds);
++        FD_SET(fd, &rfds);
++        if (select(fd + 1, &rfds, NULL, NULL, NULL) < 0) {
++            break;
++        }
++        if (!event_notifier_test_and_clear(&s->vgpu3d.doorbell_notifier)) {
++            continue;
++        }
++        if (!s->vgpu3d.running) {
++            break;
++        }
++        vgpu3d_metal_dispatch(s->vgpu3d.ring_mem);
++    }
++    return NULL;
++}
++
+ static void ati_vgpu3d_realize(ATIVGAState *s, Error **errp)
+ {
+     s->vgpu3d.ring_mem = mmap(NULL, VGPU3D_RING_DATA_SIZE,
+@@ -1162,6 +1192,16 @@ static void ati_vgpu3d_realize(ATIVGAState *s, Error **errp)
+     memory_region_set_readonly(&s->vgpu3d.ring_region, false);
+     memory_region_add_subregion(&s->mm, VGPU3D_RING_OFFSET,
+                                 &s->vgpu3d.ring_region);
++
++    if (event_notifier_init(&s->vgpu3d.doorbell_notifier, 0) < 0) {
++        error_setg(errp, "vgpu3d: failed to init doorbell notifier");
++        munmap(s->vgpu3d.ring_mem, VGPU3D_RING_DATA_SIZE);
++        return;
++    }
++    vgpu3d_metal_init(s->vgpu3d.ring_mem, s->vga.vram_ptr);
++    s->vgpu3d.running = true;
++    qemu_thread_create(&s->vgpu3d.metal_thread, "vgpu3d-metal",
++                       ati_vgpu3d_thread, s, QEMU_THREAD_JOINABLE);
+ }
+ 
+ static void ati_vga_realize(PCIDevice *dev, Error **errp)
+@@ -1289,6 +1329,15 @@ static void ati_vga_exit(PCIDevice *dev)
+ {
+     ATIVGAState *s = ATI_VGA(dev);
+ 
++    if (s->vgpu3d.running) {
++        s->vgpu3d.running = false;
++        event_notifier_set(&s->vgpu3d.doorbell_notifier);
++        qemu_thread_join(&s->vgpu3d.metal_thread);
++        event_notifier_cleanup(&s->vgpu3d.doorbell_notifier);
++        vgpu3d_metal_cleanup();
++        munmap(s->vgpu3d.ring_mem, VGPU3D_RING_DATA_SIZE);
++    }
++
+     timer_del(&s->vblank_timer);
+     qemu_graphic_console_close(s->vga.con);
+ }
+diff --git a/hw/display/ati_int.h b/hw/display/ati_int.h
+index 18e51ccaa5..c422fee145 100644
+--- a/hw/display/ati_int.h
++++ b/hw/display/ati_int.h
+@@ -129,9 +129,9 @@ struct ATIVGAState {
+         void        *ring_mem;      /* host-side mmap of ring data */
+         uint32_t     ring_head;     /* guest-written enqueue index */
+         uint32_t     ring_tail;     /* host-written dequeue index */
+-        /* Phase 5: Metal dispatch */
+-        /* QemuThread      metal_thread; */
+-        /* EventNotifier   doorbell_notifier; */
++        QemuThread    metal_thread;
++        EventNotifier doorbell_notifier;
++        bool          running;
+     } vgpu3d;
+     MemoryRegion vbe_compat;
+     ATIVGARegs regs;
