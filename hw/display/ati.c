@@ -19,6 +19,9 @@
 #include "qemu/osdep.h"
 #include "ati_int.h"
 #include "ati_regs.h"
+#include "ati_vgpu3d.h"
+#include "qemu/thread.h"
+#include "qemu/event_notifier.h"
 #include "vga-access.h"
 #include "hw/core/qdev-properties.h"
 #include "vga_regs.h"
@@ -1043,11 +1046,163 @@ static void ati_mm_write(void *opaque, hwaddr addr,
     }
 }
 
+static uint64_t ati_vga_bochs_read(void *opaque, hwaddr addr, unsigned size)
+{
+    VGACommonState *s = opaque;
+    vbe_ioport_write_index(s, 0, addr >> 1);
+    return vbe_ioport_read_data(s, 0);
+}
+
+static void ati_vga_bochs_write(void *opaque, hwaddr addr,
+                                uint64_t val, unsigned size)
+{
+    VGACommonState *s = opaque;
+    vbe_ioport_write_index(s, 0, addr >> 1);
+    vbe_ioport_write_data(s, 0, val);
+}
+
+static const MemoryRegionOps ati_vga_bochs_ops = {
+    .read = ati_vga_bochs_read,
+    .write = ati_vga_bochs_write,
+    .valid.min_access_size = 1,
+    .valid.max_access_size = 4,
+    .impl.min_access_size = 2,
+    .impl.max_access_size = 2,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+};
+
 static const MemoryRegionOps ati_mm_ops = {
     .read = ati_mm_read,
     .write = ati_mm_write,
     .endianness = DEVICE_LITTLE_ENDIAN,
 };
+
+/* ---------------------------------------------------------------------------
+ * vgpu3d Phase 2: Ring Buffer Primitive (RBP) transport
+ *
+ * The constants, structs, and MemoryRegionOps below define the complete
+ * guest<->host transport interface. The Metal dispatch thread
+ * (ati_vgpu3d_dispatch) is wired up in Phase 5.
+ * ------------------------------------------------------------------------- */
+
+#define VGPU3D_CTRL_OFFSET       0x4000   /* control regs start within BAR2 */
+#define VGPU3D_CTRL_SIZE         0x1000   /* 4 KB control page */
+#define VGPU3D_RING_OFFSET       0x10000  /* ring buffer data area */
+#define VGPU3D_RING_DATA_SIZE    (320 * KiB)
+#define VGPU3D_BAR2_TOTAL_SIZE   (512 * KiB)   /* must be power of 2 for pci_register_bar */
+
+/* Control register offsets within the control page */
+#define VGPU3D_REG_DOORBELL      0x00     /* WO: write 1 to notify host */
+#define VGPU3D_REG_TAIL          0x04     /* RO: host-consumed tail index */
+#define VGPU3D_REG_MAGIC         0x08     /* RO: 0x56475033 "VGP3" */
+#define VGPU3D_REG_VERSION       0x0C     /* RO: protocol version */
+
+#define VGPU3D_MAGIC             0x56475033U
+#define VGPU3D_PROTO_VERSION     1
+
+static uint64_t ati_vgpu3d_ctrl_read(void *opaque, hwaddr addr, unsigned size)
+{
+    ATIVGAState *s = opaque;
+
+    switch (addr) {
+    case VGPU3D_REG_TAIL:
+        return s->vgpu3d.ring_tail;
+    case VGPU3D_REG_MAGIC:
+        return VGPU3D_MAGIC;
+    case VGPU3D_REG_VERSION:
+        return VGPU3D_PROTO_VERSION;
+    default:
+        return 0;
+    }
+}
+
+static void ati_vgpu3d_ctrl_write(void *opaque, hwaddr addr,
+                                  uint64_t val, unsigned size)
+{
+    ATIVGAState *s = opaque;
+
+    switch (addr) {
+    case VGPU3D_REG_DOORBELL:
+        if (val) {
+            event_notifier_set(&s->vgpu3d.doorbell_notifier);
+        }
+        break;
+    default:
+        break;
+    }
+}
+
+static const MemoryRegionOps ati_vgpu3d_ctrl_ops = {
+    .read = ati_vgpu3d_ctrl_read,
+    .write = ati_vgpu3d_ctrl_write,
+    .valid.min_access_size = 4,
+    .valid.max_access_size = 4,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+};
+
+/* Forward declarations -- implemented in ati_metal.m (Darwin only). */
+void vgpu3d_metal_init(void *ring_mem, void *vram_ptr);
+void vgpu3d_metal_dispatch(void *ring_mem);
+void vgpu3d_metal_cleanup(void);
+
+static void *ati_vgpu3d_thread(void *opaque)
+{
+    ATIVGAState *s = opaque;
+    int fd = event_notifier_get_fd(&s->vgpu3d.doorbell_notifier);
+
+    while (s->vgpu3d.running) {
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        FD_SET(fd, &rfds);
+        if (select(fd + 1, &rfds, NULL, NULL, NULL) < 0) {
+            break;
+        }
+        if (!event_notifier_test_and_clear(&s->vgpu3d.doorbell_notifier)) {
+            continue;
+        }
+        if (!s->vgpu3d.running) {
+            break;
+        }
+        vgpu3d_metal_dispatch(s->vgpu3d.ring_mem);
+    }
+    return NULL;
+}
+
+static void ati_vgpu3d_realize(ATIVGAState *s, Error **errp)
+{
+    s->vgpu3d.ring_mem = mmap(NULL, VGPU3D_RING_DATA_SIZE,
+                              PROT_READ | PROT_WRITE,
+                              MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    if (s->vgpu3d.ring_mem == MAP_FAILED) {
+        error_setg(errp, "vgpu3d: failed to allocate ring buffer");
+        return;
+    }
+    s->vgpu3d.ring_head = 0;
+    s->vgpu3d.ring_tail = 0;
+
+    memory_region_init_io(&s->vgpu3d.ctrl_region, OBJECT(s),
+                          &ati_vgpu3d_ctrl_ops, s,
+                          "vgpu3d-ctrl", VGPU3D_CTRL_SIZE);
+    memory_region_add_subregion(&s->mm, VGPU3D_CTRL_OFFSET,
+                                &s->vgpu3d.ctrl_region);
+
+    memory_region_init_ram_ptr(&s->vgpu3d.ring_region, OBJECT(s),
+                               "vgpu3d-ring", VGPU3D_RING_DATA_SIZE,
+                               s->vgpu3d.ring_mem);
+    memory_region_set_readonly(&s->vgpu3d.ring_region, false);
+    memory_region_add_subregion(&s->mm, VGPU3D_RING_OFFSET,
+                                &s->vgpu3d.ring_region);
+
+    if (event_notifier_init(&s->vgpu3d.doorbell_notifier, 0) < 0) {
+        error_setg(errp, "vgpu3d: failed to init doorbell notifier");
+        munmap(s->vgpu3d.ring_mem, VGPU3D_RING_DATA_SIZE);
+        return;
+    }
+    vgpu3d_metal_init(s->vgpu3d.ring_mem, s->vga.vram_ptr);
+    s->vgpu3d.running = true;
+    qemu_thread_create(&s->vgpu3d.metal_thread, "vgpu3d-metal",
+                       ati_vgpu3d_thread, s, QEMU_THREAD_JOINABLE);
+}
 
 static void ati_vga_realize(PCIDevice *dev, Error **errp)
 {
@@ -1108,9 +1263,17 @@ static void ati_vga_realize(PCIDevice *dev, Error **errp)
 
     /* mmio register space */
     memory_region_init_io(&s->mm, OBJECT(s), &ati_mm_ops, s,
-                          "ati.mmregs", 0x4000);
+                          "ati.mmregs", VGPU3D_BAR2_TOTAL_SIZE);
     /* io space is alias to beginning of mmregs */
     memory_region_init_alias(&s->io, OBJECT(s), "ati.io", &s->mm, 0, 0x100);
+    /* Bochs VBE compatibility subregion at PCI_VGA_BOCHS_OFFSET (0x500).
+     * OpenBIOS vga.fs and qemu_vga.ndrv use this offset to program display
+     * modes on mac99. Without it Mac OS 9 falls through to its native ATI
+     * driver, which accesses unimplemented registers and hangs. */
+    memory_region_init_io(&s->vbe_compat, OBJECT(s), &ati_vga_bochs_ops,
+                          &s->vga, "ati-vbe-compat", PCI_VGA_BOCHS_SIZE);
+    memory_region_add_subregion(&s->mm, PCI_VGA_BOCHS_OFFSET, &s->vbe_compat);
+    ati_vgpu3d_realize(s, errp);
 
     /*
      * The framebuffer is at the beginning of the linear aperture. For
@@ -1165,6 +1328,15 @@ static void ati_vga_reset(DeviceState *dev)
 static void ati_vga_exit(PCIDevice *dev)
 {
     ATIVGAState *s = ATI_VGA(dev);
+
+    if (s->vgpu3d.running) {
+        s->vgpu3d.running = false;
+        event_notifier_set(&s->vgpu3d.doorbell_notifier);
+        qemu_thread_join(&s->vgpu3d.metal_thread);
+        event_notifier_cleanup(&s->vgpu3d.doorbell_notifier);
+        vgpu3d_metal_cleanup();
+        munmap(s->vgpu3d.ring_mem, VGPU3D_RING_DATA_SIZE);
+    }
 
     timer_del(&s->vblank_timer);
     qemu_graphic_console_close(s->vga.con);

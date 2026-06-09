@@ -560,14 +560,22 @@ static CGEventRef handleTapEvent(CGEventTapProxy proxy, CGEventType type, CGEven
 
         [self getRectsBeingDrawn:&rectList count:&rectCount];
         for (i = 0; i < rectCount; i++) {
-            clipRect = rectList[i];
-            clipRect.origin.y = (float)h - (clipRect.origin.y + clipRect.size.height);
-            clipImageRef = CGImageCreateWithImageInRect(
-                                                        imageRef,
-                                                        clipRect
-                                                        );
-            CGContextDrawImage (viewContextRef, cgrect(rectList[i]), clipImageRef);
-            CGImageRelease (clipImageRef);
+            /* Non-integer display scale makes getRectsBeingDrawn return fractional
+             * bounds coords; snap to integers to avoid sub-pixel CGImage artifacts. */
+            CGFloat x0 = floor(rectList[i].origin.x);
+            CGFloat y0 = floor(rectList[i].origin.y);
+            CGFloat x1 = ceil(rectList[i].origin.x + rectList[i].size.width);
+            CGFloat y1 = ceil(rectList[i].origin.y + rectList[i].size.height);
+            if (x0 < 0)  { x0 = 0; }
+            if (y0 < 0)  { y0 = 0; }
+            if (x1 > w)  { x1 = w; }
+            if (y1 > h)  { y1 = h; }
+            clipRect = CGRectMake(x0, (CGFloat)h - y1, x1 - x0, y1 - y0);
+            clipImageRef = CGImageCreateWithImageInRect(imageRef, clipRect);
+            CGContextDrawImage(viewContextRef,
+                               CGRectMake(x0, y0, x1 - x0, y1 - y0),
+                               clipImageRef);
+            CGImageRelease(clipImageRef);
         }
         CGImageRelease (imageRef);
         CGDataProviderRelease(dataProviderRef);

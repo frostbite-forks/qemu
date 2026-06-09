@@ -1,4 +1,4 @@
-name: Build qemu-system-ppc (macOS ARM64)
+name: Build qemu-system-ppc (macOS x86_64)
 
 on:
   push:
@@ -7,23 +7,14 @@ on:
 
 jobs:
   build:
-    name: qemu-system-ppc / macos-arm64
-    runs-on: macos-14
+    name: qemu-system-ppc / macos-x86_64
+    runs-on: macos-15-intel
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
-
-      - name: Apply vgpu3d patches
-        run: |
-          git apply patches/0001-scripts-entitlement-make-Rez-SetFile-non-fatal.patch
-          git apply patches/0002-hw-display-ati-add-Bochs-VBE-compat-for-mac99-OpenBIOS.patch
-          git apply patches/0005-ui-cocoa-snap-dirty-rects-to-integer-bounds-in-drawRect.patch
-          git apply patches/0003-hw-display-ati-vgpu3d-phase2-ring-buffer-transport.patch
-          git apply patches/0004-hw-display-ati-vgpu3d-phase3-metal-tunnel.patch
-          git apply patches/0006-hw-display-ati-metal-add-Metal-renderer.patch
 
       - name: Install Homebrew dependencies
         run: |
@@ -71,6 +62,6 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: qemu-system-ppc-macos-arm64
+          name: qemu-system-ppc-macos-x86_64
           path: dist/
           retention-days: 30

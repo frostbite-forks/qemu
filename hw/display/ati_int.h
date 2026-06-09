@@ -123,6 +123,17 @@ struct ATIVGAState {
     MemoryRegion linear_aper;
     MemoryRegion io;
     MemoryRegion mm;
+    struct {
+        MemoryRegion ctrl_region;   /* control registers at BAR2+0x4000 */
+        MemoryRegion ring_region;   /* ring data area   at BAR2+0x10000 */
+        void        *ring_mem;      /* host-side mmap of ring data */
+        uint32_t     ring_head;     /* guest-written enqueue index */
+        uint32_t     ring_tail;     /* host-written dequeue index */
+        QemuThread    metal_thread;
+        EventNotifier doorbell_notifier;
+        bool          running;
+    } vgpu3d;
+    MemoryRegion vbe_compat;
     ATIVGARegs regs;
     ATIHostDataState host_data;
 };
