@@ -75,6 +75,7 @@ config MACIO
     select MAC_DBDMA
     select MAC_NVRAM
     select MOS6522
+    select SCREAMER
 
 config IVSHMEM_DEVICE
     bool
