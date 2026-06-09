@@ -16,7 +16,7 @@ index 0000000000..13afa17c8a
 + *   frame; PKT_PRESENT commits + presents.  Texture support is Phase 4.
 + *
 + * Thread safety:
-+ *   - NSWindow creation runs on the main queue via dispatch_sync.
++ *   - NSWindow creation is dispatched async to the main queue on init.
 + *   - MTLCommandBuffer encoding and commit happen on the vgpu3d thread.
 + *   - CAMetalLayer.nextDrawable is safe from any thread.
 + */
@@ -196,7 +196,9 @@ index 0000000000..13afa17c8a
 +    }
 +    g_metal.queue = [g_metal.device newCommandQueue];
 +
-+    dispatch_sync(dispatch_get_main_queue(), ^{
++    /* dispatch_async: vgpu3d_metal_init() runs on the QEMU main thread
++     * (device realize), so dispatch_sync on the main queue would deadlock. */
++    dispatch_async(dispatch_get_main_queue(), ^{
 +        create_window_on_main();
 +    });
 +
@@ -333,7 +335,7 @@ index 0000000000..13afa17c8a
 +{
 +    free(g_metal.vtx_buf);
 +    if (g_metal.window) {
-+        dispatch_sync(dispatch_get_main_queue(), ^{
++        dispatch_async(dispatch_get_main_queue(), ^{
 +            [g_metal.window close];
 +        });
 +    }
