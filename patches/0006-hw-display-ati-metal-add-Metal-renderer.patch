@@ -3,7 +3,7 @@ new file mode 100644
 index 0000000000..13afa17c8a
 --- /dev/null
 +++ b/hw/display/ati_metal.m
-@@ -0,0 +1,335 @@
+@@ -0,0 +1,337 @@
 +/*
 + * ati_metal.m — vgpu3d Metal rendering backend
 + *
@@ -225,7 +225,7 @@ index 0000000000..13afa17c8a
 +        uint16_t type = be16_to_cpu(hdr->type);
 +        uint16_t len  = be16_to_cpu(hdr->len);
 +
-+        if (len < sizeof(vgpu3d_pkt_hdr) || len > VGPU3D_RING_CAP) {
++        if (len < sizeof(vgpu3d_pkt_hdr)) {
 +            /* corrupt packet — reset tail to head to drain */
 +            tail = head;
 +            break;
