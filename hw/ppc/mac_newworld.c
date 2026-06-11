@@ -430,7 +430,11 @@ static void ppc_core99_init(MachineState *machine)
         }
     }
 
+#ifdef CONFIG_NV20_VGA
+    pci_create_simple(pci_bus, -1, "nv20-vga");
+#else
     pci_vga_init(pci_bus);
+#endif
 
     if (!graphic_width) {
         graphic_width = 800;

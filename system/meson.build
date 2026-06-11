@@ -17,6 +17,7 @@ system_ss.add(files(
   'memory_mapping.c',
   'memory.c',
   'physmem.c',
+  'mem-access-callback.c',
   'qdev-monitor.c',
   'qtest.c',
   'rtc.c',

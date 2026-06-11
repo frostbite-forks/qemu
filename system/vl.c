@@ -226,6 +226,7 @@ static const struct {
     { .driver = "qxl-vga",              .flag = &default_vga       },
     { .driver = "virtio-vga",           .flag = &default_vga       },
     { .driver = "ati-vga",              .flag = &default_vga       },
+    { .driver = "nv20-vga",             .flag = &default_vga       },
     { .driver = "vhost-user-vga",       .flag = &default_vga       },
     { .driver = "virtio-vga-gl",        .flag = &default_vga       },
     { .driver = "virtio-vga-rutabaga",  .flag = &default_vga       },

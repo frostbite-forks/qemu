@@ -23,6 +23,7 @@
 #include "hw/core/qdev.h"
 #include "disas/dis-asm.h"
 #include "exec/breakpoint.h"
+#include "exec/mem-access-callback.h"
 #include "exec/hwaddr.h"
 #include "exec/vaddr.h"
 #include "exec/memattrs.h"
@@ -530,6 +531,8 @@ struct CPUState {
 
     QTAILQ_HEAD(, CPUWatchpoint) watchpoints;
     CPUWatchpoint *watchpoint_hit;
+
+    QTAILQ_HEAD(, MemAccessCallback) mem_access_callbacks;
 
     void *opaque;
 

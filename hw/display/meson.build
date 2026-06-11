@@ -62,12 +62,18 @@ system_ss.add(when: 'CONFIG_ARTIST', if_true: files('artist.c'))
 
 system_ss.add(when: 'CONFIG_ATI_VGA', if_true: [files('ati.c', 'ati_2d.c', 'ati_dbg.c'), pixman])
 
+nv20_ss = ss.source_set()
+subdir('nv20')
+system_ss.add_all(when: 'CONFIG_NV20_VGA', if_true: nv20_ss)
+system_ss.add(when: 'CONFIG_NV20_VGA', if_true: pixman)
+
 if host_machine.system() == 'darwin'
   metal_fw = dependency('appleframeworks',
                         modules: ['Metal'],
                         required: false)
   if metal_fw.found()
-    system_ss.add(when: 'CONFIG_ATI_VGA', if_true: [files('ati_metal.m'), metal_fw])
+    system_ss.add(when: 'CONFIG_ATI_VGA',
+                  if_true: [files('ati_metal.m'), metal_fw])
   endif
 endif
 

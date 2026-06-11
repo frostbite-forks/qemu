@@ -33,6 +33,7 @@
 #include "system/ramblock.h"
 #include "exec/mmu-access-type.h"
 #include "exec/tlb-common.h"
+#include "exec/mem-access-callback.h"
 #include "exec/vaddr.h"
 #include "tcg/tcg.h"
 #include "qemu/error-report.h"
@@ -1104,6 +1105,10 @@ void tlb_set_page_full(CPUState *cpu, int mmu_idx,
 
     wp_flags = cpu_watchpoint_address_matches(cpu, addr_page,
                                               TARGET_PAGE_SIZE);
+    if (is_ram) {
+        wp_flags |= mem_access_callback_address_matches(cpu, iotlb,
+                                                        TARGET_PAGE_SIZE);
+    }
 
     index = tlb_index(cpu, mmu_idx, addr_page);
     te = tlb_entry(cpu, mmu_idx, addr_page);
@@ -1500,6 +1505,8 @@ void *probe_access(CPUArchState *env, vaddr addr, int size,
         if (flags & TLB_WATCHPOINT) {
             int wp_access = (access_type == MMU_DATA_STORE
                              ? BP_MEM_WRITE : BP_MEM_READ);
+            mem_check_access_callback_vaddr(env_cpu(env), addr, size, wp_access,
+                                            full);
             cpu_check_watchpoint(env_cpu(env), addr, size,
                                  full->attrs, wp_access, retaddr);
         }
@@ -1702,6 +1709,7 @@ static void mmu_watch_or_dirty(CPUState *cpu, MMULookupPageData *data,
     /* On watchpoint hit, this will longjmp out.  */
     if (flags & TLB_WATCHPOINT) {
         int wp = access_type == MMU_DATA_STORE ? BP_MEM_WRITE : BP_MEM_READ;
+        mem_check_access_callback_vaddr(cpu, addr, size, wp, full);
         cpu_check_watchpoint(cpu, addr, size, full->attrs, wp, ra);
         flags &= ~TLB_WATCHPOINT;
     }
@@ -1892,8 +1900,11 @@ static void *atomic_mmu_lookup(CPUState *cpu, vaddr addr, MemOpIdx oi,
         if (full->slow_flags[MMU_DATA_LOAD] & TLB_WATCHPOINT) {
             wp_flags |= BP_MEM_READ;
         }
-        cpu_check_watchpoint(cpu, addr, size,
-                             full->attrs, wp_flags, retaddr);
+        if (wp_flags) {
+            mem_check_access_callback_vaddr(cpu, addr, size, wp_flags, full);
+            cpu_check_watchpoint(cpu, addr, size,
+                                 full->attrs, wp_flags, retaddr);
+        }
     }
 
     return hostaddr;
