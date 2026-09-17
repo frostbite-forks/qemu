@@ -24,6 +24,7 @@ system_ss.add(when: 'CONFIG_VGA_MMIO', if_true: files('vga-mmio.c'))
 system_ss.add(when: 'CONFIG_VMWARE_VGA', if_true: files('vmware_vga.c'))
 system_ss.add(when: 'CONFIG_BOCHS_DISPLAY', if_true: files('bochs-display.c'))
 system_ss.add(when: 'CONFIG_ATI_RAGE128', if_true: files('ati_rage128.c', 'ati_rage128_2d.c', 'ati_rage128_dbg.c'))
+system_ss.add(when: 'CONFIG_NV_GEFORCE3', if_true: files('nv_geforce3.c', 'nv_geforce3_2d.c', 'nv_geforce3_3d.c'))
 
 system_ss.add(when: 'CONFIG_EXYNOS4', if_true: files('exynos4210_fimd.c'))
 system_ss.add(when: 'CONFIG_FRAMEBUFFER', if_true: files('framebuffer.c'))

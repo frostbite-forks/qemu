@@ -138,6 +138,11 @@ config ATI_RAGE128
     depends on PCI
     select EDID
 
+config NV_GEFORCE3
+    bool
+    default y if PCI_DEVICES
+    depends on PCI
+
 config MACFB
     bool
     select FRAMEBUFFER
