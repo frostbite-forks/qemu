@@ -1916,7 +1916,16 @@ static bool nv_geforce3_gfx_update(void *opaque)
     uint32_t fb_offset = 0;
 
     if (!nv_geforce3_get_mode(s, &mode, &fb_offset)) {
-        if (s->mode.width != 0) {
+        ds = qemu_console_surface(s->con);
+        /*
+         * Also true right after realize, when s->con has never had a
+         * surface set at all -- without this, a guest that never
+         * programs a valid CRTC mode (or hasn't yet) leaves the console
+         * surface-less forever, and QEMU shows its generic "Guest has
+         * not initialized the display (yet)" placeholder instead of a
+         * blank screen.
+         */
+        if (s->mode.width != 0 || !ds) {
             memset(&s->mode, 0, sizeof(s->mode));
             qemu_console_resize(s->con, 640, 480);
             ds = qemu_console_surface(s->con);
