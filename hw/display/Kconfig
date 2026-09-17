@@ -142,6 +142,8 @@ config NV_GEFORCE3
     bool
     default y if PCI_DEVICES
     depends on PCI
+    select BITBANG_I2C
+    select EDID
 
 config MACFB
     bool

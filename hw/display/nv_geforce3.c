@@ -38,6 +38,9 @@
 #include "qemu/units.h"
 #include "hw/pci/pci_device.h"
 #include "hw/core/qdev-properties.h"
+#include "hw/i2c/i2c.h"
+#include "hw/i2c/bitbang_i2c.h"
+#include "hw/display/edid.h"
 #include "migration/vmstate.h"
 #include "qapi/error.h"
 #include "system/memory.h"
@@ -813,6 +816,74 @@ void nv_geforce3_update_irq(NVGeForce3State *s)
 /* ---------------------------------------------------------------- */
 /* CRTC / hardware cursor                                            */
 
+/*
+ * Minimal DDC EEPROM slave for the CRTC-extended-index-0x3f
+ * bit-banged bus -- the only one Bochs' geforce.cc actually drives
+ * through its DDC engine (see the write helper below for why indices
+ * 0x37/0x51 do not touch it at all). Serves a generated EDID; a
+ * written byte sets the read offset, reads return successive bytes.
+ */
+#define TYPE_NV_GEFORCE3_DDC "nv-geforce3-ddc"
+OBJECT_DECLARE_SIMPLE_TYPE(NVGeForce3DDCState, NV_GEFORCE3_DDC)
+
+struct NVGeForce3DDCState {
+    I2CSlave parent_obj;
+    uint8_t reg;
+    const uint8_t *edid;
+};
+
+static int nv_geforce3_ddc_event(I2CSlave *i2c, enum i2c_event event)
+{
+    return 0;
+}
+
+static uint8_t nv_geforce3_ddc_recv(I2CSlave *i2c)
+{
+    NVGeForce3DDCState *d = NV_GEFORCE3_DDC(i2c);
+
+    return d->edid ? d->edid[d->reg++ & 0x7f] : 0xff;
+}
+
+static int nv_geforce3_ddc_send(I2CSlave *i2c, uint8_t data)
+{
+    NV_GEFORCE3_DDC(i2c)->reg = data;
+    return 0;
+}
+
+static void nv_geforce3_ddc_class_init(ObjectClass *oc, const void *data)
+{
+    I2CSlaveClass *k = I2C_SLAVE_CLASS(oc);
+
+    k->event = nv_geforce3_ddc_event;
+    k->recv = nv_geforce3_ddc_recv;
+    k->send = nv_geforce3_ddc_send;
+}
+
+static const TypeInfo nv_geforce3_ddc_info = {
+    .name = TYPE_NV_GEFORCE3_DDC,
+    .parent = TYPE_I2C_SLAVE,
+    .instance_size = sizeof(NVGeForce3DDCState),
+    .class_init = nv_geforce3_ddc_class_init,
+};
+
+/*
+ * Bit-bang one SCL/SDA half-cycle through the DDC EEPROM and return
+ * the readback value CRTC extended register 0x3e stores: bit 3
+ * (0x08) mirrors the clock line, bit 2 (0x04) the (open-drain, so
+ * host-driven value ANDed with whatever the slave may be pulling low)
+ * data line -- ported from Bochs' `ddc.write(scl, sda);
+ * crtc.reg[0x3e] = ddc.read() & 0x0c;` pair, combined into one call
+ * since geforce.cc always does the read immediately after the write.
+ */
+static uint8_t nv_geforce3_ddc_write(NVGeForce3State *s, bool scl, bool sda)
+{
+    bool sda_read;
+
+    bitbang_i2c_set(&s->ddc_i2c, BITBANG_I2C_SCL, scl);
+    sda_read = bitbang_i2c_set(&s->ddc_i2c, BITBANG_I2C_SDA, sda);
+    return (scl ? 0x08 : 0x00) | (sda_read ? 0x04 : 0x00);
+}
+
 static void nv_geforce3_svga_write_crtc(NVGeForce3State *s, unsigned index,
                                         uint8_t value)
 {
@@ -826,6 +897,20 @@ static void nv_geforce3_svga_write_crtc(NVGeForce3State *s, unsigned index,
         }
     } else if (index == 0x2f || index == 0x30 || index == 0x31) {
         update_cursor_addr = true;
+    } else if (index == 0x37 || index == 0x3f || index == 0x51) {
+        bool scl = (value & 0x20) != 0;
+        bool sda = (value & 0x10) != 0;
+
+        if (index == 0x3f) {
+            s->crtc.reg[0x3e] = nv_geforce3_ddc_write(s, scl, sda);
+        } else {
+            /*
+             * Ported verbatim: unlike index 0x3f, these two just
+             * mirror the raw bits into the previous register slot --
+             * geforce.cc never routes them through the DDC engine.
+             */
+            s->crtc.reg[index - 1] = (uint8_t)((sda << 3) | (scl << 2));
+        }
     } else if (index == 0x58) {
         return;
     }
@@ -2058,6 +2143,16 @@ static void nv_geforce3_realize(PCIDevice *dev, Error **errp)
 
     nv_geforce3_init_method_handlers(s);
 
+    qemu_edid_generate(s->edid, sizeof(s->edid), &s->edid_info);
+    {
+        I2CBus *ddcbus = i2c_init_bus(DEVICE(dev), "nv-geforce3.ddc");
+        I2CSlave *slv = i2c_slave_create_simple(ddcbus, TYPE_NV_GEFORCE3_DDC,
+                                                0x50);
+
+        NV_GEFORCE3_DDC(slv)->edid = s->edid;
+        bitbang_i2c_init(&s->ddc_i2c, ddcbus);
+    }
+
     s->vblank_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
                                    nv_geforce3_vblank_timer_tick, s);
     timer_mod(s->vblank_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
@@ -2178,6 +2273,7 @@ static const VMStateDescription vmstate_nv_geforce3 = {
 static const Property nv_geforce3_properties[] = {
     DEFINE_PROP_BOOL("monitor-connected", NVGeForce3State,
                      monitor_connected, true),
+    DEFINE_EDID_PROPERTIES(NVGeForce3State, edid_info),
 };
 
 static void nv_geforce3_class_init(ObjectClass *klass, const void *data)
@@ -2217,6 +2313,7 @@ static const TypeInfo nv_geforce3_type_info = {
 static void nv_geforce3_register_types(void)
 {
     type_register_static(&nv_geforce3_type_info);
+    type_register_static(&nv_geforce3_ddc_info);
 }
 
 type_init(nv_geforce3_register_types)

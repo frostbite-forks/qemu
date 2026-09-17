@@ -46,6 +46,8 @@
 #define NV_GEFORCE3_INT_H
 
 #include "hw/pci/pci_device.h"
+#include "hw/display/edid.h"
+#include "hw/i2c/bitbang_i2c.h"
 #include "qemu/timer.h"
 #include "qom/object.h"
 
@@ -640,6 +642,11 @@ struct NVGeForce3State {
 
     bool monitor_connected;
     QEMUTimer *vblank_timer;
+
+    /* DDC (CRTC extended index 0x3f bit-banged EEPROM bus) */
+    uint8_t edid[128];
+    qemu_edid_info edid_info;
+    bitbang_i2c_interface ddc_i2c;
 };
 
 #define NV_GEFORCE3_VBLANK_PERIOD_NS (NANOSECONDS_PER_SECOND / 60)
