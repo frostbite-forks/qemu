@@ -56,14 +56,31 @@
  * losing every setting. Erase granularity is 8KB: the ROM's own info property
  * describes fff04000 as 0x4000 long and its package alternates between two
  * blocks.
+ *
+ * The PowerMac3,6 ROM (4.6.0f1) additionally identifies the part before it
+ * touches it: id-part writes ff then 90 to the window base and reads a
+ * 16-bit manufacturer/device word back, accepting only Sharp b04b/b0ed,
+ * Micron 8999/899d or (after the AMD unlock sequence) 0137. Anything else
+ * takes its "unknown-flash-part" branch, and that branch is broken in the
+ * ROM itself -- it leaves the string's address where encode-string expects
+ * its length, so the property allocator advances `here` by ~4GB and Open
+ * Firmware dies in a DSI storm before it ever probes a boot device. Real
+ * hardware never gets there, so neither may we: answer as the Sharp part,
+ * the first one probed. Its ready?/reset words use 70 (read status) and 50
+ * (clear status) on top of the erase/program commands above.
  */
 #define NVRAM_FLASH_SECTOR   0x2000
 #define NVRAM_FLASH_READY    0x80
+#define NVRAM_FLASH_MFR_ID   0xb0   /* Sharp */
+#define NVRAM_FLASH_DEV_ID   0x4b
 
 enum {
     NVRAM_FLASH_CMD_NONE        = 0x00,
     NVRAM_FLASH_CMD_ERASE_SETUP = 0x20,
     NVRAM_FLASH_CMD_PROGRAM     = 0x40,
+    NVRAM_FLASH_CMD_CLEAR_STATUS = 0x50,
+    NVRAM_FLASH_CMD_READ_STATUS = 0x70,
+    NVRAM_FLASH_CMD_READ_ID     = 0x90,
     NVRAM_FLASH_CMD_ERASE_CONF  = 0xd0,
     NVRAM_FLASH_CMD_READ_ARRAY  = 0xff,
 };
@@ -114,10 +131,24 @@ static bool macio_nvram_flash_write(MacIONVRAMState *s, hwaddr addr,
     case NVRAM_FLASH_CMD_PROGRAM:
         s->flash_cmd = value;
         s->flash_status = 0;
+        s->flash_read_id = false;
+        return true;
+    case NVRAM_FLASH_CMD_READ_ID:
+        s->flash_status = 0;
+        s->flash_read_id = true;
+        return true;
+    case NVRAM_FLASH_CMD_READ_STATUS:
+        /* Nothing here takes time, so the part is always ready. */
+        s->flash_status = NVRAM_FLASH_READY;
+        s->flash_read_id = false;
+        return true;
+    case NVRAM_FLASH_CMD_CLEAR_STATUS:
+        /* No error bits are modelled; the read mode is left alone. */
         return true;
     case NVRAM_FLASH_CMD_READ_ARRAY:
         s->flash_cmd = NVRAM_FLASH_CMD_NONE;
         s->flash_status = 0;
+        s->flash_read_id = false;
         return true;
     default:
         /* Anything else in the array state is not data: ignore it. */
@@ -156,6 +187,8 @@ static uint64_t macio_nvram_readb(void *opaque, hwaddr addr,
     /* While a command is in flight the part reports its status register. */
     if (s->flash && s->flash_status) {
         value = s->flash_status;
+    } else if (s->flash && s->flash_read_id) {
+        value = (addr & 1) ? NVRAM_FLASH_DEV_ID : NVRAM_FLASH_MFR_ID;
     }
 
     trace_macio_nvram_read(addr, value);
@@ -193,6 +226,12 @@ static const VMStateDescription vmstate_macio_nvram = {
 
 static void macio_nvram_reset(DeviceState *dev)
 {
+    MacIONVRAMState *s = MACIO_NVRAM(dev);
+
+    /* A reset part comes back in read-array mode. */
+    s->flash_cmd = NVRAM_FLASH_CMD_NONE;
+    s->flash_status = 0;
+    s->flash_read_id = false;
 }
 
 static void macio_nvram_realizefn(DeviceState *dev, Error **errp)

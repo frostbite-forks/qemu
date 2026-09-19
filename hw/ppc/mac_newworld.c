@@ -58,6 +58,8 @@
 #include "system/blockdev.h"
 #include "hw/core/boards.h"
 #include "hw/pci-host/uninorth.h"
+#include "hw/core/hotplug.h"
+#include "hw/pci/pci_bus.h"
 #include "hw/input/adb.h"
 #include "hw/ppc/mac_dbdma.h"
 #include "hw/pci/pci.h"
@@ -151,6 +153,9 @@ struct Core99MachineState {
     MachineState parent;
 
     Core99ViaConfig via_config;
+    bool via_config_set;
+    bool apple_rom;
+    PCIBus *agp_bus;
     Core99Model model;
 };
 
@@ -1073,6 +1078,21 @@ static void ppc_core99_init(MachineState *machine)
     rom_is_flash = filename && !firmware_is_elf(filename);
 
     /*
+     * A real PowerMac3,4/3,6 has a PMU, never a CUDA, and a real Apple ROM
+     * depends on it for more than the VIA itself: the KeyLargo GPIO block
+     * only exists alongside the PMU (see macio_newworld_realize()). Left on
+     * the OpenBIOS-era CUDA default, the ROM's POST reads the programmer's
+     * switch line (GPIO window offset 0x61) from unmapped space, gets 0 --
+     * "switch held down at power-on" -- and enters firmware-update mode,
+     * which announces itself with one long tone and never boots. Observed
+     * with the PowerMac3,6 4.6.0f1 ROM. An explicit via= still wins.
+     */
+    core99_machine->apple_rom = rom_is_flash;
+    if (rom_is_flash && !core99_machine->via_config_set) {
+        core99_machine->via_config = CORE99_VIA_CONFIG_PMU;
+    }
+
+    /*
      * A ROM *device* rather than plain ROM so that guest stores into the
      * boot-flash range are visible (traced) instead of silently dropped:
      * the real part is one flash chip, and a guest flash driver may issue
@@ -1285,6 +1305,7 @@ static void ppc_core99_init(MachineState *machine)
          */
         memory_region_add_subregion_overlap(get_system_memory(), 0xf0000000,
                                              sysbus_mmio_get_region(s, 3), -1);
+        core99_machine->agp_bus = PCI_HOST_BRIDGE(uninorth_agp_dev)->bus;
 
         /* Uninorth internal bus */
         uninorth_internal_dev = qdev_new(
@@ -1766,10 +1787,63 @@ static const char *core99_get_default_cpu_type(const MachineState *ms)
 }
 #endif
 
+/*
+ * The AGP bus has exactly one slot, device 0x10 -- the device tree's
+ * /pci@f0000000/ATY,...@10 and the NVRAM default aapl,pci=/@f0000000/@10 --
+ * and a real Apple ROM only ever looks for its display there. A plain
+ * "-device <card>" lands on the main PCI bus at the first free slot instead,
+ * where the ROM sizes the card's BARs and then abandons it: memory space
+ * never enabled, FCode never run, no picture. So a display card given no
+ * explicit addr= is moved into the AGP slot while that is free, and a card
+ * that can report an AGP identity (ati-rage128-pro's "agp", 1002:5046 --
+ * which an AGP card's FCode ROM insists on matching) is told to. Naming a
+ * slot with addr= keeps a card wherever it was put, e.g. a PCI Rage 128 on
+ * the main bus. Only for an Apple ROM: OpenBIOS takes the card as it comes.
+ */
+#define CORE99_AGP_SLOT 0x10
+
+static bool core99_is_display_card(Core99MachineState *cms, DeviceState *dev)
+{
+    return cms->apple_rom && cms->agp_bus &&
+           object_dynamic_cast(OBJECT(dev), TYPE_PCI_DEVICE) &&
+           (PCI_DEVICE_GET_CLASS(dev)->class_id >> 8) == PCI_BASE_CLASS_DISPLAY;
+}
+
+static void core99_machine_device_pre_plug(HotplugHandler *hotplug_dev,
+                                           DeviceState *dev, Error **errp)
+{
+    Core99MachineState *cms = CORE99_MACHINE(hotplug_dev);
+    PCIDevice *pci_dev = PCI_DEVICE(dev);
+    int agp_devfn = PCI_DEVFN(CORE99_AGP_SLOT, 0);
+
+    if (pci_dev->devfn == -1 && !cms->agp_bus->devices[agp_devfn]) {
+        if (qdev_get_parent_bus(dev) != BUS(cms->agp_bus) &&
+            !qdev_set_parent_bus(dev, BUS(cms->agp_bus), errp)) {
+            return;
+        }
+        pci_dev->devfn = agp_devfn;
+    }
+    if (qdev_get_parent_bus(dev) == BUS(cms->agp_bus) &&
+        pci_dev->devfn == agp_devfn &&
+        object_property_find(OBJECT(dev), "agp")) {
+        object_property_set_bool(OBJECT(dev), "agp", true, errp);
+    }
+}
+
+static HotplugHandler *core99_get_hotplug_handler(MachineState *machine,
+                                                  DeviceState *dev)
+{
+    if (core99_is_display_card(CORE99_MACHINE(machine), dev)) {
+        return HOTPLUG_HANDLER(machine);
+    }
+    return NULL;
+}
+
 static void core99_machine_class_init(ObjectClass *oc, const void *data)
 {
     MachineClass *mc = MACHINE_CLASS(oc);
     FWPathProviderClass *fwc = FW_PATH_PROVIDER_CLASS(oc);
+    HotplugHandlerClass *hc = HOTPLUG_HANDLER_CLASS(oc);
 
     mc->desc = "Mac99 based PowerMac";
     mc->init = ppc_core99_init;
@@ -1789,6 +1863,8 @@ static void core99_machine_class_init(ObjectClass *oc, const void *data)
     mc->default_ram_id = "ppc_core99.ram";
     mc->ignore_boot_device_suffixes = true;
     fwc->get_dev_path = core99_fw_dev_path;
+    mc->get_hotplug_handler = core99_get_hotplug_handler;
+    hc->pre_plug = core99_machine_device_pre_plug;
 }
 
 static char *core99_get_via_config(Object *obj, Error **errp)
@@ -1812,6 +1888,7 @@ static void core99_set_via_config(Object *obj, const char *value, Error **errp)
 {
     Core99MachineState *cms = CORE99_MACHINE(obj);
 
+    cms->via_config_set = true;
     if (!strcmp(value, "cuda")) {
         cms->via_config = CORE99_VIA_CONFIG_CUDA;
     } else if (!strcmp(value, "pmu")) {
@@ -1889,6 +1966,7 @@ static const TypeInfo core99_machine_info = {
     .instance_size = sizeof(Core99MachineState),
     .interfaces = (const InterfaceInfo[]) {
         { TYPE_FW_PATH_PROVIDER },
+        { TYPE_HOTPLUG_HANDLER },
         { }
     },
 };

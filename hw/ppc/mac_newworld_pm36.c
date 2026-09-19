@@ -225,8 +225,20 @@ int pm36_macio_devfn(void)
     return pm34_macio_devfn();
 }
 
-/* Confirmed identical to PowerMac3,4 from the real device tree: usb@18. */
+/*
+ * Not PowerMac3,4's usb@18. The FireWire 800 Mirrored Drive Doors ("P58B" to
+ * its ROM) runs its USB ports from a NEC USB 2.0 controller in slot 0x1b of
+ * this bus, not from KeyLargo's OHCI cells, and the 4.6.0f1 ROM enforces
+ * that: finish-p58b-usbnodes deletes whatever nodes the usb0/usb1 aliases
+ * name and re-points the aliases at pci1/usb@1b and usb@1b,1. An OHCI left
+ * at 0x18 is therefore probed and used by Open Firmware itself and then
+ * removed from the tree handed to the OS -- Mac OS X never sees a USB
+ * controller, never enumerates the keyboard and mouse, and with a PMU there
+ * is no ADB to fall back on. The NEC part's first function is an OHCI, which
+ * is all that is modelled here; the ROM's interrupt table gives slot 0x1b
+ * source 0x3f (see pci_unin_main_real_map_irq()).
+ */
 int pm36_usb_devfn(void)
 {
-    return pm34_usb_devfn();
+    return PCI_DEVFN(0x1b, 0);
 }

@@ -170,6 +170,12 @@ static int pci_unin_main_real_map_irq(PCIDevice *pci_dev, int irq_num)
     case 0x18: return 4;
     case 0x19: return 5;
     case 0x1a: return 6;
+    /*
+     * PowerMac3,6 only (the NEC USB controller's slot): its ROM's table
+     * sends 0x1b to 0x3f, the same source as 0x1a. Nothing sits here on a
+     * PowerMac3,4.
+     */
+    case 0x1b: return 6;
     default:   return 7;
     }
 }
