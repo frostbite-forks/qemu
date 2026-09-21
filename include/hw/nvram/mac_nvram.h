@@ -44,6 +44,7 @@ struct MacIONVRAMState {
     bool flash;                 /* emulate the Intel-style flash interface */
     uint8_t flash_cmd;          /* command latched by the previous write */
     uint8_t flash_status;
+    bool flash_read_id;         /* 0x90 latched: reads return the part ID */
 
     MemoryRegion mem;
     uint8_t *data;

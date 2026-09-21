@@ -11,6 +11,7 @@
 #define PMU_H
 
 #include "hw/input/adb.h"
+#include "hw/i2c/i2c.h"
 #include "hw/misc/mos6522.h"
 #include "hw/misc/macio/gpio.h"
 #include "qom/object.h"
@@ -237,6 +238,16 @@ struct PMUState {
     uint32_t tick_offset;
     QEMUTimer *one_sec_timer;
     int64_t one_sec_target;
+
+    /*
+     * The PMU's own I2C master (PMU_I2C_CMD). A transfer is only started by
+     * the command; its outcome -- and any bytes read -- are collected by a
+     * later PMU_I2C_BUS_STATUS poll, so both have to be held in between.
+     */
+    I2CBus *i2c_bus;
+    uint8_t i2c_status;
+    uint8_t i2c_data_len;
+    uint8_t i2c_data[32];
 
     /* PMU_POWER_EVENTS server ID (set/queried by Mac OS X's ApplePMU) */
     uint8_t server_id;

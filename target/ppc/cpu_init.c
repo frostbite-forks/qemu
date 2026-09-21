@@ -678,7 +678,7 @@ static void register_l3_ctrl(CPUPPCState *env)
     /* L3CR */
     spr_register(env, SPR_L3CR, "L3CR",
                  SPR_NOACCESS, SPR_NOACCESS,
-                 &spr_read_generic, &spr_write_generic,
+                 &spr_read_l3cr, &spr_write_generic,
                  0x00000000);
     /* L3ITCR0 */
     spr_register(env, SPR_L3ITCR0, "L3ITCR0",
@@ -4341,6 +4341,11 @@ static void init_proc_7440(CPUPPCState *env)
     register_non_embedded_sprs(env);
     register_sdr1_sprs(env);
     register_74xx_sprs(env);
+#ifndef CONFIG_USER_ONLY
+    /* L2CR[L2HWF] is hardware-cleared on this family */
+    env->spr_cb[SPR_L2CR].oea_read = &spr_read_l2cr_745x;
+    env->spr_cb[SPR_L2CR].hea_read = &spr_read_l2cr_745x;
+#endif
     vscr_init(env, 0x00010000);
 
     spr_register(env, SPR_UBAMR, "UBAMR",
@@ -4442,6 +4447,11 @@ static void init_proc_7450(CPUPPCState *env)
     register_non_embedded_sprs(env);
     register_sdr1_sprs(env);
     register_74xx_sprs(env);
+#ifndef CONFIG_USER_ONLY
+    /* L2CR[L2HWF] is hardware-cleared on this family */
+    env->spr_cb[SPR_L2CR].oea_read = &spr_read_l2cr_745x;
+    env->spr_cb[SPR_L2CR].hea_read = &spr_read_l2cr_745x;
+#endif
     vscr_init(env, 0x00010000);
     /* Level 3 cache control */
     register_l3_ctrl(env);
@@ -4565,6 +4575,11 @@ static void init_proc_7445(CPUPPCState *env)
     register_non_embedded_sprs(env);
     register_sdr1_sprs(env);
     register_74xx_sprs(env);
+#ifndef CONFIG_USER_ONLY
+    /* L2CR[L2HWF] is hardware-cleared on this family */
+    env->spr_cb[SPR_L2CR].oea_read = &spr_read_l2cr_745x;
+    env->spr_cb[SPR_L2CR].hea_read = &spr_read_l2cr_745x;
+#endif
     vscr_init(env, 0x00010000);
     /* LDSTCR */
     spr_register(env, SPR_LDSTCR, "LDSTCR",
@@ -4695,6 +4710,11 @@ static void init_proc_7455(CPUPPCState *env)
     register_non_embedded_sprs(env);
     register_sdr1_sprs(env);
     register_74xx_sprs(env);
+#ifndef CONFIG_USER_ONLY
+    /* L2CR[L2HWF] is hardware-cleared on this family */
+    env->spr_cb[SPR_L2CR].oea_read = &spr_read_l2cr_745x;
+    env->spr_cb[SPR_L2CR].hea_read = &spr_read_l2cr_745x;
+#endif
     vscr_init(env, 0x00010000);
     /* Level 3 cache control */
     register_l3_ctrl(env);
@@ -4827,6 +4847,11 @@ static void init_proc_7457(CPUPPCState *env)
     register_non_embedded_sprs(env);
     register_sdr1_sprs(env);
     register_74xx_sprs(env);
+#ifndef CONFIG_USER_ONLY
+    /* L2CR[L2HWF] is hardware-cleared on this family */
+    env->spr_cb[SPR_L2CR].oea_read = &spr_read_l2cr_745x;
+    env->spr_cb[SPR_L2CR].hea_read = &spr_read_l2cr_745x;
+#endif
     vscr_init(env, 0x00010000);
     /* Level 3 cache control */
     register_l3_ctrl(env);
@@ -4979,6 +5004,11 @@ static void init_proc_e600(CPUPPCState *env)
     register_non_embedded_sprs(env);
     register_sdr1_sprs(env);
     register_74xx_sprs(env);
+#ifndef CONFIG_USER_ONLY
+    /* L2CR[L2HWF] is hardware-cleared on this family */
+    env->spr_cb[SPR_L2CR].oea_read = &spr_read_l2cr_745x;
+    env->spr_cb[SPR_L2CR].hea_read = &spr_read_l2cr_745x;
+#endif
     vscr_init(env, 0x00010000);
 
     spr_register(env, SPR_UBAMR, "UBAMR",

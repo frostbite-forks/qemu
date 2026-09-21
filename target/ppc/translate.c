@@ -507,6 +507,34 @@ void spr_read_l2cr(DisasContext *ctx, int gprn, int sprn)
 }
 
 /*
+ * The 7450 family adds L2CR[L2HWF], hardware flush: software sets it and
+ * polls until the hardware clears it on completion. Mac OS X's cacheInit
+ * does exactly that on every boot (ori r10,r10,0x800; mtspr l2cr; then
+ * mfspr/rlwinm. bit 20/bne back), so a bit that stays set hangs xnu in real
+ * mode moments after BootX hands over -- grey Apple, no spinner. L3CR has
+ * the same pair, L3HWF and L3I, both hardware-cleared. On the 7400/7410 the
+ * 0x800 position is L2DF, plain configuration that must round-trip, which
+ * is why this is a separate handler rather than a wider mask above.
+ */
+#define L2CR_L2HWF  0x00000800  /* 745x: hardware flush */
+#define L3CR_L3HWF  0x00000800  /* hardware flush       */
+#define L3CR_L3I    0x00000400  /* global invalidate    */
+
+void spr_read_l2cr_745x(DisasContext *ctx, int gprn, int sprn)
+{
+    gen_load_spr(cpu_gpr[gprn], sprn);
+    tcg_gen_andi_tl(cpu_gpr[gprn], cpu_gpr[gprn],
+                    ~(target_ulong)(L2CR_L2I | L2CR_L2IP | L2CR_L2HWF));
+}
+
+void spr_read_l3cr(DisasContext *ctx, int gprn, int sprn)
+{
+    gen_load_spr(cpu_gpr[gprn], sprn);
+    tcg_gen_andi_tl(cpu_gpr[gprn], cpu_gpr[gprn],
+                    ~(target_ulong)(L3CR_L3HWF | L3CR_L3I));
+}
+
+/*
  * HID0[ICFI]/[DCFI] (L1 instruction/data cache flash invalidate) are the
  * same class of self-clearing status bit as L2CR's L2I/L2IP above: real
  * 74xx hardware clears each one on the cycle after the write that set it
