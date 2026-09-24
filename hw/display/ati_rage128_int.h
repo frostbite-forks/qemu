@@ -145,6 +145,57 @@ typedef struct ATIRage128Job {
     uint32_t a, b;
 } ATIRage128Job;
 
+/*
+ * Parallel rasterisation. Triangles are queued until the draw state is
+ * about to change, then the batch's rows are split into contiguous
+ * bands of absolute screen rows and each band is drawn by a different
+ * thread; the submitting thread draws band 0 and waits for the rest, so
+ * the batch is complete before anything else runs.
+ *
+ * Within a band the triangles are drawn in submission order, and a row
+ * belongs to one band whichever triangle covers it, so every pixel is
+ * written by one thread in the order it would have been written
+ * serially. Every band runs the same code over the same setup, so the
+ * pixels are bit for bit the ones the serial loop produced.
+ */
+#define ATI_RAGE128_RASTER_MAX_THREADS 8
+
+/*
+ * Below this many pixels in the bounding box a triangle is drawn
+ * serially: waking a worker costs more than the rows would.
+ */
+#define ATI_RAGE128_RASTER_MIN_PX 4096
+
+/* triangles held back waiting for a flush */
+#define ATI_RAGE128_RASTER_QUEUE 1024
+
+typedef struct ATIRage128RasterWorker {
+    struct ATIRage128State *s;
+    QemuThread thread;
+    QemuSemaphore start;
+    int band;
+} ATIRage128RasterWorker;
+
+typedef struct ATIRage128Raster {
+    unsigned threads;                 /* property: 0 = auto from host cpus */
+    unsigned nworkers;                /* live helpers, 0 = always serial */
+    bool quit;
+    QemuSemaphore done;
+    /* the batch the bands are drawing, and the rows each one owns */
+    ATIRage128Vertex tri[ATI_RAGE128_RASTER_QUEUE][3];
+    unsigned ntri;                    /* queued, not yet flushed */
+    unsigned batch;                   /* handed to the bands */
+    unsigned nbands;
+    int band_y0[ATI_RAGE128_RASTER_MAX_THREADS];
+    int band_y1[ATI_RAGE128_RASTER_MAX_THREADS];
+    double qy0, qy1, qpx;             /* the queue's rows and bbox pixels */
+    /* how the split is actually landing; read with the raster-stats property */
+    uint64_t tri_serial;              /* drawn on the submitting thread alone */
+    uint64_t tri_split;               /* split across bands */
+    uint64_t px_serial, px_split;     /* their bounding-box pixels */
+    ATIRage128RasterWorker worker[ATI_RAGE128_RASTER_MAX_THREADS];
+} ATIRage128Raster;
+
 struct ATIRage128State {
     PCIDevice parent_obj;
 
@@ -171,6 +222,8 @@ struct ATIRage128State {
     uint64_t engine_jobs_retired;     /* BQL */
     bool engine_quit;
     OnOffAuto engine_async;
+    /* Triangle rows split across workers; see ati_rage128_3d_triangle. */
+    ATIRage128Raster raster;
     /* FIFO dwords written behind queued jobs; see ati_rage128_fifo_stage. */
     uint32_t *fifo_stage;             /* BQL */
     uint32_t fifo_stage_n;            /* BQL */
@@ -531,6 +584,9 @@ void ati_rage128_audit_reg_write(ATIRage128State *s, uint32_t base);
 void ati_rage128_2d_blt(ATIRage128State *s);
 void ati_rage128_2d_flush_dirty(ATIRage128State *s);
 void ati_rage128_3d_triangle(ATIRage128State *s, const ATIRage128Vertex *v);
+void ati_rage128_raster_init(ATIRage128State *s);
+void ati_rage128_raster_flush(ATIRage128State *s);
+void ati_rage128_raster_fini(ATIRage128State *s);
 void ati_rage128_2d_scale(ATIRage128State *s, const uint32_t *pkt);
 void ati_rage128_2d_scale_regs(ATIRage128State *s);
 bool ati_rage128_host_data_flush(ATIRage128State *s);

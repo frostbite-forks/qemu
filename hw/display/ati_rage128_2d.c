@@ -12,6 +12,7 @@
 #include "qemu/bswap.h"
 #include "system/memory.h"
 #include "ui/console.h"
+#include "qemu/rcu.h"
 
 #include "ati_rage128_int.h"
 #include "ati_rage128_regs.h"
@@ -41,6 +42,8 @@ static int ati_rage128_bpp_from_datatype(uint32_t datatype)
         return 24;
     case 6:
         return 32;
+    case 15:
+        return 16;                              /* ARGB4444 */
     default:
         return 0;
     }
@@ -1829,7 +1832,23 @@ have_texel:
     return true;
 }
 
-void ati_rage128_3d_triangle(ATIRage128State *s, const ATIRage128Vertex *vin)
+/*
+ * Draw the rows of one triangle that fall in the screen rows [y0, y1].
+ * Every band repeats the whole setup -- a few hundred operations against
+ * the thousands a band of rows costs -- so that each one is the serial
+ * function with a narrower row range, and no draw state has to be
+ * snapshotted or shared between the threads.
+ *
+ * The bounds are absolute screen rows, not a share of this triangle's
+ * own height: a batch of triangles is split along one set of row
+ * boundaries, so that a row belongs to the same band whichever triangle
+ * is covering it and two bands can never touch one pixel.
+ *
+ * `band` only picks which one traces.
+ */
+static void ati_rage128_3d_triangle_band(ATIRage128State *s,
+                                         const ATIRage128Vertex *vin,
+                                         unsigned band, int y0, int y1)
 {
     unsigned dt = s->dp_datatype & R128_DP_DST_DATATYPE;
     int bpp = ati_rage128_bpp_from_dp_datatype(s);
@@ -2143,16 +2162,25 @@ void ati_rage128_3d_triangle(ATIRage128State *s, const ATIRage128Vertex *vin)
     pixmask = bpp >= 32 ? 0xffffffffu : (1u << bpp) - 1;
     wmask = s->dp_write_mask & pixmask;
 
-    trace_ati_rage128_3d_state(tex_cntl, misc,
-                               s->regs[R128_PRIM_TEXTURE_COMBINE_CNTL_C >> 2],
-                               s->regs[R128_PRIM_TEX_CNTL_C >> 2],
-                               blend, textured);
-    trace_ati_rage128_3d_tri((int)x[0], (int)y[0], (int)x[1], (int)y[1],
-                             (int)x[2], (int)y[2],
-                             ati_rage128_3d_col8(a[0]) << 24 |
-                             ati_rage128_3d_col8(r[0]) << 16 |
-                             ati_rage128_3d_col8(g[0]) << 8 |
-                             ati_rage128_3d_col8(b[0]));
+    /* one line per triangle, not one per band */
+    if (band == 0) {
+        trace_ati_rage128_3d_state(tex_cntl, misc,
+                             s->regs[R128_PRIM_TEXTURE_COMBINE_CNTL_C >> 2],
+                             s->regs[R128_PRIM_TEX_CNTL_C >> 2],
+                             blend, textured);
+        trace_ati_rage128_3d_tri((int)x[0], (int)y[0], (int)x[1], (int)y[1],
+                                 (int)x[2], (int)y[2],
+                                 ati_rage128_3d_col8(a[0]) << 24 |
+                                 ati_rage128_3d_col8(r[0]) << 16 |
+                                 ati_rage128_3d_col8(g[0]) << 8 |
+                                 ati_rage128_3d_col8(b[0]));
+    }
+
+    miny = MAX(miny, y0);
+    maxy = MIN(maxy, y1);
+    if (miny > maxy) {
+        return;                                 /* nothing of it in this band */
+    }
 
     for (py = miny; py <= maxy; py++) {
         double sy = py + 0.5;
@@ -2366,4 +2394,192 @@ void ati_rage128_3d_triangle(ATIRage128State *s, const ATIRage128Vertex *vin)
         ati_rage128_span_flush(s, &dspan);
         ati_rage128_span_flush(s, &zspan);
     }
+}
+
+/*
+ * Queue the triangle instead of drawing it. Everything in a queue was
+ * submitted between two draw-state changes, so one flush can draw the
+ * lot under the state standing now -- and the wakeup that a single
+ * small triangle could never repay is paid once for the whole batch.
+ */
+static void ati_rage128_raster_queue(ATIRage128State *s,
+                                     const ATIRage128Vertex *vin)
+{
+    ATIRage128Raster *r = &s->raster;
+    double y0 = MIN(vin[0].y, MIN(vin[1].y, vin[2].y));
+    double y1 = MAX(vin[0].y, MAX(vin[1].y, vin[2].y));
+    double w = MAX(vin[0].x, MAX(vin[1].x, vin[2].x)) -
+               MIN(vin[0].x, MIN(vin[1].x, vin[2].x));
+
+    memcpy(r->tri[r->ntri], vin, 3 * sizeof(*vin));
+    if (r->ntri == 0) {
+        r->qy0 = y0;
+        r->qy1 = y1;
+    } else {
+        r->qy0 = MIN(r->qy0, y0);
+        r->qy1 = MAX(r->qy1, y1);
+    }
+    r->qpx += w * (y1 - y0);
+    r->ntri++;
+}
+
+/*
+ * Draw everything queued. Below ATI_RAGE128_RASTER_MIN_PX of bounding
+ * box across the batch it is drawn here and now: waking the workers
+ * would cost more than the rows.
+ */
+void ati_rage128_raster_flush(ATIRage128State *s)
+{
+    ATIRage128Raster *r = &s->raster;
+    unsigned nbands, i, n;
+    int rows, top;
+
+    if (r->ntri == 0) {
+        return;
+    }
+    n = r->ntri;
+    r->ntri = 0;                                /* before any early return */
+
+    if (!(r->qpx >= (double)ATI_RAGE128_RASTER_MIN_PX) ||
+        !isfinite(r->qy0) || !isfinite(r->qy1)) {
+        r->tri_serial += n;
+        r->px_serial += (uint64_t)MAX(r->qpx, 0.0);
+        r->qpx = 0;
+        for (i = 0; i < n; i++) {
+            ati_rage128_3d_triangle_band(s, r->tri[i], 0, INT_MIN, INT_MAX);
+        }
+        return;
+    }
+
+    /* the rows the batch spans, clamped to something an int can hold */
+    top = (int)MAX(r->qy0 - 1.0, -16384.0);
+    rows = (int)MIN(r->qy1 + 1.0, 16384.0) - top + 1;
+    nbands = MIN(r->nworkers + 1, (unsigned)MAX(rows, 1));
+
+    r->tri_split += n;
+    r->px_split += (uint64_t)r->qpx;
+    r->qpx = 0;
+    if (nbands <= 1) {
+        for (i = 0; i < n; i++) {
+            ati_rage128_3d_triangle_band(s, r->tri[i], 0, INT_MIN, INT_MAX);
+        }
+        return;
+    }
+
+    /*
+     * One set of absolute row boundaries for the whole batch, so a row
+     * has exactly one owner no matter which triangle covers it.
+     * Published before the workers are released and untouched until
+     * every one has posted done, so the semaphores order the stores.
+     */
+    r->nbands = nbands;
+    r->batch = n;
+    for (i = 0; i < nbands; i++) {
+        r->band_y0[i] = top + (int)((int64_t)rows * i / nbands);
+        r->band_y1[i] = top + (int)((int64_t)rows * (i + 1) / nbands) - 1;
+    }
+    for (i = 1; i < nbands; i++) {
+        qemu_sem_post(&r->worker[i - 1].start);
+    }
+    for (i = 0; i < n; i++) {
+        ati_rage128_3d_triangle_band(s, r->tri[i], 0,
+                                     r->band_y0[0], r->band_y1[0]);
+    }
+    for (i = 1; i < nbands; i++) {
+        qemu_sem_wait(&r->done);
+    }
+}
+
+static void *ati_rage128_raster_thread(void *opaque)
+{
+    ATIRage128RasterWorker *w = opaque;
+    ATIRage128State *s = w->s;
+
+    /* the band resolves VRAM through memory_region_get_ram_ptr() */
+    rcu_register_thread();
+    for (;;) {
+        unsigned i;
+
+        qemu_sem_wait(&w->start);
+        if (qatomic_read(&s->raster.quit)) {
+            break;
+        }
+        for (i = 0; i < s->raster.batch; i++) {
+            ati_rage128_3d_triangle_band(s, s->raster.tri[i], w->band,
+                                         s->raster.band_y0[w->band],
+                                         s->raster.band_y1[w->band]);
+        }
+        qemu_sem_post(&s->raster.done);
+    }
+    rcu_unregister_thread();
+    return NULL;
+}
+
+void ati_rage128_3d_triangle(ATIRage128State *s, const ATIRage128Vertex *vin)
+{
+    if (!s->raster.nworkers) {
+        s->raster.tri_serial++;
+        ati_rage128_3d_triangle_band(s, vin, 0, INT_MIN, INT_MAX);
+        return;
+    }
+    ati_rage128_raster_queue(s, vin);
+    if (s->raster.ntri == ATI_RAGE128_RASTER_QUEUE) {
+        ati_rage128_raster_flush(s);
+    }
+}
+
+/*
+ * One helper per spare host core, capped: the submitting thread draws a
+ * band itself, so `nworkers` helpers give `nworkers + 1` bands. Zero
+ * helpers means every triangle is drawn exactly as it was before.
+ */
+void ati_rage128_raster_init(ATIRage128State *s)
+{
+    unsigned want = s->raster.threads;
+    unsigned i;
+
+    if (want == 0) {
+        long cpus = sysconf(_SC_NPROCESSORS_ONLN);
+
+        /* leave the vCPUs and the main loop room; never more than half */
+        want = cpus > 2 ? (unsigned)(cpus / 2) : 1;
+    }
+    want = MIN(want, ATI_RAGE128_RASTER_MAX_THREADS);
+    if (want <= 1) {
+        s->raster.nworkers = 0;
+        return;
+    }
+
+    qemu_sem_init(&s->raster.done, 0);
+    for (i = 0; i < want - 1; i++) {
+        ATIRage128RasterWorker *w = &s->raster.worker[i];
+        char name[24];
+
+        w->s = s;
+        w->band = i + 1;
+        qemu_sem_init(&w->start, 0);
+        snprintf(name, sizeof(name), "ati-r128-raster%u", i);
+        qemu_thread_create(&w->thread, name, ati_rage128_raster_thread, w,
+                           QEMU_THREAD_JOINABLE);
+    }
+    s->raster.nworkers = want - 1;
+}
+
+void ati_rage128_raster_fini(ATIRage128State *s)
+{
+    unsigned i;
+
+    if (!s->raster.nworkers) {
+        return;
+    }
+    qatomic_set(&s->raster.quit, true);
+    for (i = 0; i < s->raster.nworkers; i++) {
+        qemu_sem_post(&s->raster.worker[i].start);
+    }
+    for (i = 0; i < s->raster.nworkers; i++) {
+        qemu_thread_join(&s->raster.worker[i].thread);
+        qemu_sem_destroy(&s->raster.worker[i].start);
+    }
+    qemu_sem_destroy(&s->raster.done);
+    s->raster.nworkers = 0;
 }

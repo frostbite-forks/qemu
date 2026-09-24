@@ -45,6 +45,7 @@
 #include "ui/console.h"
 #include "qemu/main-loop.h"
 #include "qemu/thread.h"
+#include "qemu/rcu.h"
 #include "system/qtest.h"
 #include "qom/object.h"
 #include "hw/i2c/i2c.h"
@@ -202,11 +203,45 @@ static void ati_rage128_draw_8bpp(ATIRage128State *s, DisplaySurface *ds,
     }
 }
 
+/*
+ * The DAC runs every pixel component through the 256-entry palette in
+ * the direct-colour depths too: an 8-bit component selects its own
+ * entry, a 5-bit one entry c << 3 and a 6-bit one entry c << 2 (the
+ * entries the r128 drivers load for 15/16bpp). That palette is the
+ * guest's gamma ramp; Mac OS X keeps its display profile's curve there
+ * and Quake III draws at half intensity and doubles it through the
+ * ramp. With the identity ramp the plain expansion below is kept.
+ */
+static void ati_rage128_palette_reset(ATIRage128State *s)
+{
+    int i;
+
+    for (i = 0; i < 256; i++) {
+        s->palette[i][0] = i;
+        s->palette[i][1] = i;
+        s->palette[i][2] = i;
+    }
+}
+
+static const uint8_t (*ati_rage128_palette_lut(ATIRage128State *s))[3]
+{
+    int i;
+
+    for (i = 0; i < 256; i++) {
+        if (s->palette[i][0] != i || s->palette[i][1] != i ||
+            s->palette[i][2] != i) {
+            return (const uint8_t (*)[3])s->palette;
+        }
+    }
+    return NULL;
+}
+
 static void ati_rage128_draw_16bpp(ATIRage128State *s, DisplaySurface *ds,
                                    const ATIRage128Mode *mode, bool rgb565)
 {
     uint8_t *src = (uint8_t *)memory_region_get_ram_ptr(&s->vram) +
                    mode->fb_offset;
+    const uint8_t (*lut)[3] = ati_rage128_palette_lut(s);
     uint32_t *dst;
     int x, y;
 
@@ -221,15 +256,20 @@ static void ati_rage128_draw_16bpp(ATIRage128State *s, DisplaySurface *ds,
                 r = ((pixel >> 11) & 0x1f) << 3;
                 g = ((pixel >> 5) & 0x3f) << 2;
                 b = (pixel & 0x1f) << 3;
-                g |= g >> 6;
             } else {                        /* RGB555 */
                 r = ((pixel >> 10) & 0x1f) << 3;
                 g = ((pixel >> 5) & 0x1f) << 3;
                 b = (pixel & 0x1f) << 3;
-                g |= g >> 5;
             }
-            r |= r >> 5;
-            b |= b >> 5;
+            if (lut) {
+                r = lut[r][0];
+                g = lut[g][1];
+                b = lut[b][2];
+            } else {
+                g |= rgb565 ? g >> 6 : g >> 5;
+                r |= r >> 5;
+                b |= b >> 5;
+            }
             dst[x] = 0xff000000u | ((uint32_t)r << 16) |
                      ((uint32_t)g << 8) | b;
         }
@@ -242,16 +282,26 @@ static void ati_rage128_draw_32bpp(ATIRage128State *s, DisplaySurface *ds,
 {
     uint8_t *src = (uint8_t *)memory_region_get_ram_ptr(&s->vram) +
                    mode->fb_offset;
+    const uint8_t (*lut)[3] = ati_rage128_palette_lut(s);
     uint32_t *dst;
     int x, y;
 
     for (y = 0; y < mode->height; y++) {
         dst = (uint32_t *)((uint8_t *)surface_data(ds) +
                            y * surface_stride(ds));
-        for (x = 0; x < mode->width; x++) {
-            /* chip-native little-endian: B,G,R,X in VRAM */
-            dst[x] = 0xff000000u | ((uint32_t)src[4 * x + 2] << 16) |
-                     ((uint32_t)src[4 * x + 1] << 8) | src[4 * x];
+        /* chip-native little-endian: B,G,R,X in VRAM */
+        if (lut) {
+            for (x = 0; x < mode->width; x++) {
+                dst[x] = 0xff000000u |
+                         ((uint32_t)lut[src[4 * x + 2]][0] << 16) |
+                         ((uint32_t)lut[src[4 * x + 1]][1] << 8) |
+                         lut[src[4 * x]][2];
+            }
+        } else {
+            for (x = 0; x < mode->width; x++) {
+                dst[x] = 0xff000000u | ((uint32_t)src[4 * x + 2] << 16) |
+                         ((uint32_t)src[4 * x + 1] << 8) | src[4 * x];
+            }
         }
         src += mode->pitch;
     }
@@ -262,16 +312,26 @@ static void ati_rage128_draw_24bpp(ATIRage128State *s, DisplaySurface *ds,
 {
     uint8_t *src = (uint8_t *)memory_region_get_ram_ptr(&s->vram) +
                    mode->fb_offset;
+    const uint8_t (*lut)[3] = ati_rage128_palette_lut(s);
     uint32_t *dst;
     int x, y;
 
     for (y = 0; y < mode->height; y++) {
         dst = (uint32_t *)((uint8_t *)surface_data(ds) +
                            y * surface_stride(ds));
-        for (x = 0; x < mode->width; x++) {
-            /* chip-native little-endian: B,G,R in VRAM */
-            dst[x] = 0xff000000u | ((uint32_t)src[3 * x + 2] << 16) |
-                     ((uint32_t)src[3 * x + 1] << 8) | src[3 * x];
+        /* chip-native little-endian: B,G,R in VRAM */
+        if (lut) {
+            for (x = 0; x < mode->width; x++) {
+                dst[x] = 0xff000000u |
+                         ((uint32_t)lut[src[3 * x + 2]][0] << 16) |
+                         ((uint32_t)lut[src[3 * x + 1]][1] << 8) |
+                         lut[src[3 * x]][2];
+            }
+        } else {
+            for (x = 0; x < mode->width; x++) {
+                dst[x] = 0xff000000u | ((uint32_t)src[3 * x + 2] << 16) |
+                         ((uint32_t)src[3 * x + 1] << 8) | src[3 * x];
+            }
         }
         src += mode->pitch;
     }
@@ -1662,6 +1722,8 @@ static void ati_rage128_engine_run_job(ATIRage128State *s, int job,
         break;
     }
     }
+    /* a job ends where the guest can look again: leave nothing queued */
+    ati_rage128_raster_flush(s);
 }
 
 static void *ati_rage128_engine_thread(void *opaque)
@@ -1669,6 +1731,8 @@ static void *ati_rage128_engine_thread(void *opaque)
     ATIRage128State *s = opaque;
     uint64_t taken = 0;
 
+    /* the jobs resolve VRAM through memory_region_get_ram_ptr() */
+    rcu_register_thread();
     qemu_mutex_lock(&s->engine_lock);
     for (;;) {
         ATIRage128Job j;
@@ -1694,6 +1758,7 @@ static void *ati_rage128_engine_thread(void *opaque)
         qemu_bh_schedule(s->engine_bh);
     }
     qemu_mutex_unlock(&s->engine_lock);
+    rcu_unregister_thread();
     return NULL;
 }
 
@@ -3228,6 +3293,8 @@ static void ati_rage128_pm4_run(ATIRage128State *s)
         }
         }
     }
+    /* the buffer is parsed: nothing may stay queued past its end */
+    ati_rage128_raster_flush(s);
 }
 
 /*
@@ -3895,12 +3962,23 @@ static void ati_rage128_pm4_parse(ATIRage128State *s,
         break;
     }
     p->remaining--;
-    if (p->remaining == 0 && p->type == 3 &&
-        p->p3_opcode == R128_PM4_OPCODE_HOSTDATA_BLT &&
-        s->host_data_active) {
-        ati_rage128_host_data_flush(s);
-        s->host_data_active = false;
-        s->host_data_next = 0;
+    if (p->remaining == 0) {
+        if (p->type == 3 &&
+            p->p3_opcode == R128_PM4_OPCODE_HOSTDATA_BLT &&
+            s->host_data_active) {
+            ati_rage128_host_data_flush(s);
+            s->host_data_active = false;
+            s->host_data_next = 0;
+        }
+        /*
+         * Draw whatever this packet queued, so a packet still leaves
+         * the card drawn when it ends -- everything that looks at the
+         * result, from the next packet to a guest read of the frame
+         * buffer, keeps seeing it finished. A batch therefore never
+         * outlives one primitive packet, which is also what makes the
+         * draw state it was queued under still the current one.
+         */
+        ati_rage128_raster_flush(s);
     }
 }
 
@@ -3959,6 +4037,8 @@ static void ati_rage128_pm4_indirect(ATIRage128State *s, uint32_t offset,
             ati_rage128_pm4_parse(s, &parser, chunk[j]);
         }
     }
+    /* the buffer is parsed: nothing may stay queued past its end */
+    ati_rage128_raster_flush(s);
 }
 
 /*
@@ -4271,7 +4351,7 @@ static void ati_rage128_reset_hold(Object *obj, ResetType type)
 
     memset(s->regs, 0, sizeof(s->regs));
     memset(s->plls, 0, sizeof(s->plls));
-    memset(s->palette, 0, sizeof(s->palette));
+    ati_rage128_palette_reset(s);
     /* every driver's engine init writes all-ones here; a zero mask
      * would silently draw nothing until it does */
     s->dp_write_mask = 0xffffffff;
@@ -4582,6 +4662,7 @@ static void ati_rage128_realize(PCIDevice *dev, Error **errp)
                                     ATI_RAGE128_FIFO_BATCH);
     qemu_thread_create(&s->engine_thread, "ati-rage128-engine",
                        ati_rage128_engine_thread, s, QEMU_THREAD_JOINABLE);
+    ati_rage128_raster_init(s);
     s->dirty_lo = UINT32_MAX;
     s->dirty_hi = 0;
     /*
@@ -4737,6 +4818,7 @@ static void ati_rage128_exit(PCIDevice *dev)
     qemu_cond_signal(&s->engine_cond);
     qemu_mutex_unlock(&s->engine_lock);
     qemu_thread_join(&s->engine_thread);
+    ati_rage128_raster_fini(s);
     qemu_bh_delete(s->engine_bh);
     g_free(s->fifo_stage);
     g_free(s->fifo_batch);
@@ -4778,6 +4860,11 @@ static const Property ati_rage128_properties[] = {
     /* command-stream kicks on a worker thread; auto = on except qtest */
     DEFINE_PROP_ON_OFF_AUTO("async-engine", ATIRage128State, engine_async,
                             ON_OFF_AUTO_AUTO),
+    /*
+     * Threads a triangle's rows are split across, counting the one that
+     * submitted it: 0 = half the host's cores, 1 = draw serially.
+     */
+    DEFINE_PROP_UINT32("raster-threads", ATIRage128State, raster.threads, 0),
     DEFINE_EDID_PROPERTIES(ATIRage128State, edid_info),
 };
 
@@ -4794,6 +4881,31 @@ static const Property ati_rage128_properties[] = {
  * generated (ati_rage128_audit.h); regenerate it when the model learns
  * a register, or that register keeps being reported.
  */
+/*
+ * `raster-stats`: whether triangles are actually reaching the parallel
+ * path. A guest whose triangles all fall under ATI_RAGE128_RASTER_MIN_PX
+ * shows split 0, and then an unchanged frame rate says nothing about
+ * the bands -- it says the threshold never let them run.
+ */
+static char *ati_rage128_get_raster_stats(Object *obj, Error **errp)
+{
+    ATIRage128State *s = ATI_RAGE128(obj);
+    uint64_t tri = s->raster.tri_serial + s->raster.tri_split;
+    uint64_t px = s->raster.px_serial + s->raster.px_split;
+
+    return g_strdup_printf(
+        "workers %u (+submitter), threshold %d px\n"
+        "triangles %" PRIu64 ": %" PRIu64 " split (%.1f%%), "
+        "%" PRIu64 " serial\n"
+        "bbox pixels %" PRIu64 ": %" PRIu64 " split (%.1f%%), "
+        "%" PRIu64 " serial",
+        s->raster.nworkers, ATI_RAGE128_RASTER_MIN_PX,
+        tri, s->raster.tri_split, tri ? 100.0 * s->raster.tri_split / tri : 0.0,
+        s->raster.tri_serial,
+        px, s->raster.px_split, px ? 100.0 * s->raster.px_split / px : 0.0,
+        s->raster.px_serial);
+}
+
 static char *ati_rage128_get_silent_regs(Object *obj, Error **errp)
 {
     ATIRage128State *s = ATI_RAGE128(obj);
@@ -4848,6 +4960,8 @@ static void ati_rage128_class_init(ObjectClass *klass, const void *data)
     set_bit(DEVICE_CATEGORY_DISPLAY, dc->categories);
     object_class_property_add_str(klass, "silent-regs",
                                   ati_rage128_get_silent_regs, NULL);
+    object_class_property_add_str(klass, "raster-stats",
+                                  ati_rage128_get_raster_stats, NULL);
 }
 
 static const TypeInfo ati_rage128_type_info = {
