@@ -73,6 +73,8 @@ typedef struct R300TexUnit {
     uint32_t pitch;         /* bytes per texel row */
     unsigned bpp;           /* bits per texel: 8, 16, 32 or 64 */
     unsigned code;          /* TX_FORMAT1 TXFORMAT, to tell the widths apart */
+    unsigned yuv;           /* TX_FORMAT1 YUV_TO_RGB mode, 4:2:2 formats only */
+    bool packed422;         /* code is one of the two 4:2:2 formats */
     unsigned sel[4];        /* TX_FORMAT1 component select, A R G B */
     unsigned clamp_s, clamp_t;  /* TX_FILTER0 clamp modes (0 = repeat) */
 } R300TexUnit;
@@ -292,6 +294,62 @@ static inline uint32_t r300_texel_16x4(uint32_t lo, uint32_t hi)
     return r300_pack_xyzw(lo >> 8, lo >> 24, hi >> 8, hi >> 24);
 }
 
+static inline uint32_t r300_clip8(int v)
+{
+    return v < 0 ? 0 : v > 255 ? 255 : (uint32_t)v;
+}
+
+/*
+ * TX_FMT_YVYU422 and TX_FMT_VYUY422 (codes 0x14 and 0x15, 16 bits per
+ * texel): one dword covers texels 2k and 2k+1, which share a chroma
+ * pair and keep a luma each. Read as the 32-bit format's four bytes it
+ * is twice the stride and twice the row pitch it should be -- which is
+ * the whole picture squeezed into each quadrant, the lower two of them
+ * showing whatever frame sits in VRAM after the texture. That is what
+ * Mac OS X 10.4's Setup Assistant intro looked like: QuickTime hands
+ * its 2vuy frames to the compositor in this format.
+ *
+ * The result is packed for r300_texel_chan() as ARGB8888 in the
+ * (W,Z,Y,X) order the window tiles use, and the selector is bypassed:
+ * the register reference lists these formats as unswizzled. Mode 1
+ * converts video-range YCbCr (Y 16..235, C 16..240, BT.601), mode 2
+ * full-range, and mode 0 forwards the triple with Y in R.
+ */
+static inline uint32_t r300_texel_422(uint32_t v, bool yuyv, int odd,
+                                      unsigned mode)
+{
+    int y, cb, cr, r, g, b;
+
+    if (yuyv) {
+        y = (v >> (odd ? 16 : 0)) & 0xff;
+        cb = (v >> 8) & 0xff;
+        cr = (v >> 24) & 0xff;
+    } else {
+        y = (v >> (odd ? 24 : 8)) & 0xff;
+        cb = v & 0xff;
+        cr = (v >> 16) & 0xff;
+    }
+    if (mode == R300_TX_YUV_TO_RGB_CLAMP) {
+        int c = 298 * (y - 16), d = cb - 128, e = cr - 128;
+
+        r = (c + 409 * e + 128) >> 8;
+        g = (c - 100 * d - 208 * e + 128) >> 8;
+        b = (c + 516 * d + 128) >> 8;
+    } else if (mode == R300_TX_YUV_TO_RGB_FULL) {
+        int d = cb - 128, e = cr - 128;
+
+        r = y + ((359 * e + 128) >> 8);
+        g = y - ((88 * d + 183 * e + 128) >> 8);
+        b = y + ((454 * d + 128) >> 8);
+    } else {
+        r = y;
+        g = cb;
+        b = cr;
+    }
+    return r300_pack_xyzw(r300_clip8(b), r300_clip8(g), r300_clip8(r),
+                          0xff);
+}
+
 static uint32_t r300_sample_tex(ATIR350State *s, const R300DrawState *d,
                                 unsigned unit, int tx, int ty)
 {
@@ -323,6 +381,26 @@ static uint32_t r300_sample_tex(ATIR350State *s, const R300DrawState *d,
     }
     addr = u->off + (uint32_t)ty * u->pitch +
            (uint32_t)tx * (u->bpp / 8);
+    if (u->packed422) {
+        /*
+         * The dword holding this texel and its neighbour, in address
+         * order through the swapper like any other dword read; the
+         * texel's parity picks its luma out of it.
+         */
+        uint32_t v;
+
+        addr &= ~3u;
+        if (ati_r350_mc_to_vram(s, addr, &off)) {
+            if (off + 4 > ATI_R350_VRAM_SIZE) {
+                return 0;
+            }
+            v = ati_r350_vram_ld32(s, off);
+        } else {
+            v = ati_r350_mc_read32(s, addr);
+        }
+        return r300_texel_422(v, u->code == R300_TX_FMT_VYUY422, tx & 1,
+                              u->yuv);
+    }
     if (u->bpp == 8) {
         /* single-component format: the byte is component X */
         uint8_t a;
@@ -401,7 +479,7 @@ static uint32_t r300_sample_tex(ATIR350State *s, const R300DrawState *d,
 static float r300_texel_chan(const R300TexUnit *u, uint32_t texel,
                              unsigned ch)
 {
-    unsigned sel = u->sel[ch];
+    unsigned sel = u->packed422 ? 3 - ch : u->sel[ch];
 
     if (sel == R300_TX_SEL_ONE) {
         return 1.0f;
@@ -2475,20 +2553,27 @@ static void r300_tex_setup(ATIR350State *s, R300DrawState *d, unsigned unit)
      * are drawn with; 0xb is TX_FMT_1_5_5_5, which Abstract.saver
      * asks for; 0xc is TX_FMT_8_8_8_8, what the compositor and most
      * apps use; 0xe is TX_FMT_16_16_16_16, which RSS Visualizer.saver
-     * asks for. r300_sample_tex() hands all of them to the component
-     * select as four bytes, so one selector implementation serves
+     * asks for; 0x14 and 0x15 are the packed 4:2:2 YCbCr formats
+     * QuickTime's video frames arrive in, two texels to a dword --
+     * see r300_texel_422(). r300_sample_tex() hands all of them to
+     * the component select as four bytes, so one selector serves
      * every format. TXPITCH counts texels, so the byte pitch scales
      * with the texel size -- reading an 8_8 texture as four bytes per
      * texel doubled both the pitch and the stride and made one dword
      * span two texels.
      */
     u->code = txcode;
+    u->yuv = (txfmt1 >> R300_TX_FORMAT1_YUV_SHIFT) & R300_TX_FORMAT1_YUV_MASK;
+    u->packed422 = txcode == R300_TX_FMT_YVYU422 ||
+                   txcode == R300_TX_FMT_VYUY422;
     switch (txcode) {
     case R300_TX_FMT_8:
         u->bpp = 8;
         break;
     case R300_TX_FMT_8_8:
     case R300_TX_FMT_1_5_5_5:
+    case R300_TX_FMT_YVYU422:
+    case R300_TX_FMT_VYUY422:
         u->bpp = 16;
         break;
     case R300_TX_FMT_16_16_16_16:
@@ -4525,6 +4610,7 @@ static bool r300_gl_tex_same(const ATIR350State *s, unsigned k,
            s->gl_tex[k].pitch == u->pitch &&
            s->gl_tex[k].bpp == u->bpp &&
            s->gl_tex[k].code == u->code &&
+           s->gl_tex[k].yuv == u->yuv &&
            s->gl_tex[k].w == u->w && s->gl_tex[k].h == u->h &&
            s->gl_tex[k].xr == xr &&
            s->gl_tex[k].sel[0] == u->sel[0] &&
@@ -4614,6 +4700,7 @@ static const uint8_t *r300_gl_texture(ATIR350State *s, const R300DrawState *d,
     s->gl_tex[victim].pitch = u->pitch;
     s->gl_tex[victim].bpp = u->bpp;
     s->gl_tex[victim].code = u->code;
+    s->gl_tex[victim].yuv = u->yuv;
     s->gl_tex[victim].w = u->w;
     s->gl_tex[victim].h = u->h;
     s->gl_tex[victim].xr = xr;

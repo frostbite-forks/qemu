@@ -675,7 +675,7 @@ struct ATIR350State {
      */
     struct {
         uint32_t off, len, pitch;
-        unsigned bpp, code, xr;
+        unsigned bpp, code, yuv, xr;
         unsigned sel[4];
         int w, h;
         uint8_t *rgba;

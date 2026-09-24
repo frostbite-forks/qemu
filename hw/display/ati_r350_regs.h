@@ -986,6 +986,22 @@
 #define R300_TX_FMT_1_5_5_5           0x0b    /* X[4:0] Y[9:5] Z[14:10] W[15] */
 #define R300_TX_FMT_8_8_8_8           0x0c    /* four, X the low byte */
 #define R300_TX_FMT_16_16_16_16       0x0e    /* four 16-bit, X the low half */
+/*
+ * The two packed 4:2:2 formats, 16 bits per texel with the chroma pair
+ * shared by two horizontally adjacent texels: one dword in address
+ * order is Cb Y0 Cr Y1 for the first and Y0 Cb Y1 Cr for the second.
+ * They are what QuickTime's 2vuy and yuvs frames upload as. The
+ * component select does not apply to them; TX_FORMAT1 [23:22] instead
+ * says whether the unit converts to RGB (1 = video-range Y 16..235,
+ * 2 = full-range) or hands the YCbCr triple over as it is.
+ */
+#define R300_TX_FMT_YVYU422           0x14    /* Cb Y0 Cr Y1 */
+#define R300_TX_FMT_VYUY422           0x15    /* Y0 Cb Y1 Cr */
+#define R300_TX_FORMAT1_YUV_SHIFT     22
+#define R300_TX_FORMAT1_YUV_MASK      0x3
+#define R300_TX_YUV_TO_RGB_OFF        0
+#define R300_TX_YUV_TO_RGB_CLAMP      1
+#define R300_TX_YUV_TO_RGB_FULL       2
 #define R300_TX_FORMAT1_SEL_SHIFT     9       /* A, then R, G, B */
 #define R300_TX_FORMAT1_SEL_MASK      0x7
 #define R300_TX_SEL_X                 0
