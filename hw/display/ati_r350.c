@@ -3848,9 +3848,11 @@ static void ati_r350_realize(PCIDevice *dev, Error **errp)
                        s->gl_path);
             return;
         }
-        s->gl_ctx = ati_r350_gl_open(&why);
+        s->gl_ctx = ati_r350_gl_open(s->gl_backend_path, &why);
         if (!s->gl_ctx) {
-            error_setg(errp, "gl=%s: %s", s->gl_path, why);
+            error_setg(errp, "gl=%s gl-backend=%s: %s", s->gl_path,
+                       s->gl_backend_path && s->gl_backend_path[0]
+                       ? s->gl_backend_path : "auto", why);
             return;
         }
         trace_ati_r350_gl_open(ati_r350_gl_describe(s->gl_ctx));
@@ -4070,6 +4072,13 @@ static const Property ati_r350_properties[] = {
      * "on", or "verify". See ati_r350_gl.h.
      */
     DEFINE_PROP_STRING("gl", ATIR350State, gl_path),
+    /*
+     * Which host API renders it: "auto" (the default: the first
+     * implementation the host can open, GL before Metal), "opengl" or
+     * "metal". Ignored under gl=off. See the candidate list in
+     * ati_r350_gl.c for why GL is still the default on darwin.
+     */
+    DEFINE_PROP_STRING("gl-backend", ATIR350State, gl_backend_path),
     /*
      * Diagnostic only (milestone M4): translate each vertex program the
      * guest uploads to GLSL and count whether the translator could

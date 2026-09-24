@@ -35,14 +35,22 @@ system_ss.add(when: 'CONFIG_ATI_RAGE128', if_true: files('ati_rage128.c', 'ati_r
 # optional dependency and QEMU's own SDL display owns the video subsystem
 # (see the win32 leg's comment in ati_r350_gl.c). Elsewhere the file
 # compiles to a stub that reports there is no backend.
+#
+# ati_r350_metal.m is the second implementation of the same contract,
+# darwin only: Metal, offscreen, selected with gl-backend=metal. It is
+# Objective-C, which the darwin build already enables for ui/cocoa.m and
+# apple-gfx.m, and it needs no display backend either.
+r350_gl_srcs = files('ati_r350_gl.c')
 r350_gl_deps = []
 if host_os == 'darwin'
-  r350_gl_deps += dependency('appleframeworks', modules: 'OpenGL')
+  r350_gl_srcs += files('ati_r350_metal.m')
+  r350_gl_deps += dependency('appleframeworks',
+                             modules: ['OpenGL', 'Metal', 'Foundation'])
 elif host_os == 'windows'
   r350_gl_deps += [cc.find_library('opengl32'), cc.find_library('gdi32'),
                    cc.find_library('user32')]
 endif
-system_ss.add(when: 'CONFIG_ATI_R350', if_true: [files('ati_r350.c', 'ati_r350_2d.c', 'ati_r350_3d.c', 'ati_r350_dbg.c', 'ati_r350_pvs.c', 'ati_r350_pvs_glsl.c', 'ati_r350_us.c', 'ati_r350_us_glsl.c', 'ati_r350_gl.c'), r350_gl_deps])
+system_ss.add(when: 'CONFIG_ATI_R350', if_true: [files('ati_r350.c', 'ati_r350_2d.c', 'ati_r350_3d.c', 'ati_r350_dbg.c', 'ati_r350_pvs.c', 'ati_r350_pvs_glsl.c', 'ati_r350_us.c', 'ati_r350_us_glsl.c'), r350_gl_srcs, r350_gl_deps])
 
 system_ss.add(when: 'CONFIG_EXYNOS4', if_true: files('exynos4210_fimd.c'))
 system_ss.add(when: 'CONFIG_FRAMEBUFFER', if_true: files('framebuffer.c'))

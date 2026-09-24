@@ -20,6 +20,13 @@
  * port, and the same reasoning kept GL_NV_texture_barrier out (see the
  * M3 note below).
  *
+ * This file is also where the device's entry points live: the bottom of
+ * it dispatches ati_r350_gl_*() through the R350GlOps table of whichever
+ * implementation ati_r350_gl_open() chose. The GL implementation is
+ * r350_ogl_ops here; ati_r350_metal.m is the other, and it reproduces
+ * this file's shaders and passes on Metal rather than re-deriving them
+ * -- every "why" below applies to it too.
+ *
  * The shaders are the ones phase-2 milestone M1 validated offline in
  * doc/radeon9800/gl-replay/ against the software rasterizer, on a
  * corpus of real captured draws: interior pixels 99.9992 % at delta 0
@@ -632,7 +639,8 @@ typedef struct R350GlProgSlot {
     R350GlProg p;
 } R350GlProgSlot;
 
-struct R350GlCtx {
+typedef struct R350OglCtx {
+    R350GlCtx base;
     R350GlPlat plat;
     R350GlProgSlot prog[R350_GL_PROGSLOTS];
     unsigned prog_next;         /* round-robin victim */
@@ -652,7 +660,9 @@ struct R350GlCtx {
     uint8_t *stage;
     size_t stage_sz;
     char desc[128];
-};
+} R350OglCtx;
+
+static const R350GlOps r350_ogl_ops;
 
 static const char *vs_src =
 "#version 330 core\n"
@@ -1059,7 +1069,7 @@ static void gl_prog_locs(R350GlProg *p)
  * where the interpreter computes the same thing this text does. So a
  * failed link costs correctness nothing and is counted.
  */
-static R350GlProg *gl_prog_for(R350GlCtx *g, const R350GlReq *r, bool add)
+static R350GlProg *gl_prog_for(R350OglCtx *g, const R350GlReq *r, bool add)
 {
     const char *err = NULL;
     R350GlProgSlot *sl;
@@ -1092,13 +1102,16 @@ static R350GlProg *gl_prog_for(R350GlCtx *g, const R350GlReq *r, bool add)
     return &sl->p;
 }
 
-R350GlCtx *ati_r350_gl_open(const char **err)
+static void r350_ogl_close(R350GlCtx *ctx);
+
+static R350GlCtx *r350_ogl_open(const char **err)
 {
-    R350GlCtx *g;
+    R350OglCtx *g;
     unsigned k;
 
     *err = NULL;
-    g = g_new0(R350GlCtx, 1);
+    g = g_new0(R350OglCtx, 1);
+    g->base.ops = &r350_ogl_ops;
     if (!r350_gl_plat_open(&g->plat, err)) {
         g_free(g);
         return NULL;
@@ -1108,7 +1121,7 @@ R350GlCtx *ati_r350_gl_open(const char **err)
     g->n2ui = g->ui2n ? gl_link(vs_blit_src, NULL, NULL, fs_n2ui_src, err)
                       : 0;
     if (!g->n2ui) {
-        ati_r350_gl_close(g);
+        r350_ogl_close(&g->base);
         return NULL;
     }
     glUseProgram(g->ui2n);
@@ -1179,19 +1192,18 @@ R350GlCtx *ati_r350_gl_open(const char **err)
              (const char *)glGetString(GL_VERSION),
              (const char *)glGetString(GL_SHADING_LANGUAGE_VERSION));
     if (glGetError() != GL_NO_ERROR) {
-        ati_r350_gl_close(g);
+        r350_ogl_close(&g->base);
         *err = "GL reported an error while setting the backend up";
         return NULL;
     }
     r350_gl_done(&g->plat);
-    return g;
+    return &g->base;
 }
 
-void ati_r350_gl_close(R350GlCtx *g)
+static void r350_ogl_close(R350GlCtx *ctx)
 {
-    if (!g) {
-        return;
-    }
+    R350OglCtx *g = (R350OglCtx *)ctx;
+
     if (g->plat.ctx) {
         unsigned k;
 
@@ -1218,9 +1230,9 @@ void ati_r350_gl_close(R350GlCtx *g)
     g_free(g);
 }
 
-const char *ati_r350_gl_describe(R350GlCtx *g)
+static const char *r350_ogl_describe(R350GlCtx *ctx)
 {
-    return g ? g->desc : "none";
+    return ((R350OglCtx *)ctx)->desc;
 }
 
 /*
@@ -1228,12 +1240,14 @@ const char *ati_r350_gl_describe(R350GlCtx *g)
  * means the caller's key is changing when the program is not, which is
  * a real cost: relinking a GLSL program mid-frame is a pipeline stall.
  */
-void ati_r350_gl_prog_stats(R350GlCtx *g, uint64_t *hits, uint64_t *links,
-                            uint64_t *failed)
+static void r350_ogl_prog_stats(R350GlCtx *ctx, uint64_t *hits,
+                                uint64_t *links, uint64_t *failed)
 {
-    *hits = g ? g->prog_hits : 0;
-    *links = g ? g->prog_links : 0;
-    *failed = g ? g->prog_failed : 0;
+    R350OglCtx *g = (R350OglCtx *)ctx;
+
+    *hits = g->prog_hits;
+    *links = g->prog_links;
+    *failed = g->prog_failed;
 }
 
 /*
@@ -1259,7 +1273,7 @@ void ati_r350_gl_prog_stats(R350GlCtx *g, uint64_t *hits, uint64_t *links,
  * through the packed format and through the staging permute disagree on
  * 0 of 3145728 bytes.
  */
-static uint8_t *gl_stage(R350GlCtx *g, size_t need)
+static uint8_t *gl_stage(R350OglCtx *g, size_t need)
 {
     if (need > g->stage_sz) {
         g->stage = g_realloc(g->stage, need);
@@ -1268,10 +1282,12 @@ static uint8_t *gl_stage(R350GlCtx *g, size_t need)
     return g->stage;
 }
 
-bool ati_r350_gl_target(R350GlCtx *g, int w, int h, bool *lost)
+static bool r350_ogl_target(R350GlCtx *ctx, int w, int h, bool *lost)
 {
+    R350OglCtx *g = (R350OglCtx *)ctx;
+
     *lost = false;
-    if (!g || w <= 0 || h <= 0) {
+    if (w <= 0 || h <= 0) {
         return false;
     }
     if (w <= g->fb_w && h <= g->fb_h) {
@@ -1327,14 +1343,15 @@ bool ati_r350_gl_target(R350GlCtx *g, int w, int h, bool *lost)
     return true;
 }
 
-bool ati_r350_gl_seed(R350GlCtx *g, int x0, int y0, int w, int h,
-                      const uint8_t *base, unsigned pitch, unsigned xr)
+static bool r350_ogl_seed(R350GlCtx *ctx, int x0, int y0, int w, int h,
+                          const uint8_t *base, unsigned pitch, unsigned xr)
 {
+    R350OglCtx *g = (R350OglCtx *)ctx;
     uint8_t *st;
     bool ok;
     int x, y;
 
-    if (!g || w <= 0 || h <= 0 ||
+    if (w <= 0 || h <= 0 ||
         x0 < 0 || y0 < 0 || x0 + w > g->fb_w || y0 + h > g->fb_h) {
         return false;
     }
@@ -1360,14 +1377,15 @@ bool ati_r350_gl_seed(R350GlCtx *g, int x0, int y0, int w, int h,
     return ok;
 }
 
-bool ati_r350_gl_fetch(R350GlCtx *g, int x0, int y0, int w, int h,
-                       uint8_t *base, unsigned pitch, unsigned xr)
+static bool r350_ogl_fetch(R350GlCtx *ctx, int x0, int y0, int w, int h,
+                           uint8_t *base, unsigned pitch, unsigned xr)
 {
+    R350OglCtx *g = (R350OglCtx *)ctx;
     uint8_t *st;
     bool ok;
     int x, y;
 
-    if (!g || w <= 0 || h <= 0 ||
+    if (w <= 0 || h <= 0 ||
         x0 < 0 || y0 < 0 || x0 + w > g->fb_w || y0 + h > g->fb_h) {
         return false;
     }
@@ -1393,13 +1411,14 @@ bool ati_r350_gl_fetch(R350GlCtx *g, int x0, int y0, int w, int h,
     return ok;
 }
 
-bool ati_r350_gl_draw(R350GlCtx *g, const R350GlReq *r)
+static bool r350_ogl_draw(R350GlCtx *ctx, const R350GlReq *r)
 {
+    R350OglCtx *g = (R350OglCtx *)ctx;
     const R350GlProg *p;
     int sx0, sy0, sx1, sy1;
     bool ok;
 
-    if (!g || r->w <= 0 || r->h <= 0 || !r->nvert ||
+    if (r->w <= 0 || r->h <= 0 || !r->nvert ||
         r->surf_w > g->fb_w || r->surf_h > g->fb_h) {
         return false;
     }
@@ -1605,50 +1624,123 @@ bool ati_r350_gl_draw(R350GlCtx *g, const R350GlReq *r)
     return ok;
 }
 
-#else /* no host GL backend */
+static const R350GlOps r350_ogl_ops = {
+    .name = "opengl",
+    .open = r350_ogl_open,
+    .close = r350_ogl_close,
+    .target = r350_ogl_target,
+    .seed = r350_ogl_seed,
+    .fetch = r350_ogl_fetch,
+    .draw = r350_ogl_draw,
+    .describe = r350_ogl_describe,
+    .prog_stats = r350_ogl_prog_stats,
+};
 
-R350GlCtx *ati_r350_gl_open(const char **err)
+#endif /* CONFIG_DARWIN || _WIN32 */
+
+/*
+ * THE DISPATCH. The device calls these and nothing else; each one hands
+ * its arguments to the implementation the context came from. A NULL
+ * context is legal everywhere -- `gl=off` never opens one -- and is
+ * the "none" a device left at the default reports.
+ *
+ * The candidate list is in PREFERENCE order for "auto", and the order
+ * is a decision: GL first where it exists, because it is the
+ * implementation the phase-2 milestones measured against the software
+ * rasterizer (99.9992 % at delta 0 on the M1 corpus, and the numbers in
+ * ati_r350_3d.c's gl=verify comments are all its). Metal is the
+ * platform-native path on darwin and is meant to take that place once
+ * gl=verify has scored it the same way; until then it is opt-in through
+ * gl-backend=metal. A host with no implementation at all reports so.
+ */
+static const R350GlOps *const r350_gl_backends[] = {
+#if defined(CONFIG_DARWIN) || defined(_WIN32)
+    &r350_ogl_ops,
+#endif
+#ifdef CONFIG_DARWIN
+    &r350_mtl_ops,
+#endif
+    NULL    /* a host with none has an empty list, not an empty array */
+};
+
+R350GlCtx *ati_r350_gl_open(const char *backend, const char **err)
 {
-    *err = "no host GL backend is built for this platform";
+    const char *first = NULL;
+    bool any = false;
+    unsigned k;
+
+    *err = NULL;
+    if (backend && backend[0] && strcmp(backend, "auto")) {
+        for (k = 0; r350_gl_backends[k]; k++) {
+            if (!strcmp(backend, r350_gl_backends[k]->name)) {
+                return r350_gl_backends[k]->open(err);
+            }
+        }
+        *err = "no such rendering backend is built for this host "
+               "(gl-backend is one of auto, opengl, metal)";
+        return NULL;
+    }
+    for (k = 0; r350_gl_backends[k]; k++) {
+        R350GlCtx *g = r350_gl_backends[k]->open(err);
+
+        if (g) {
+            return g;
+        }
+        /* the first refusal is the one worth reporting: it is the default's */
+        if (!any) {
+            first = *err;
+            any = true;
+        }
+    }
+    *err = any ? first : "no host GPU rendering backend is built for this "
+                         "platform";
     return NULL;
 }
 
 void ati_r350_gl_close(R350GlCtx *g)
 {
+    if (g) {
+        g->ops->close(g);
+    }
 }
 
 bool ati_r350_gl_target(R350GlCtx *g, int w, int h, bool *lost)
 {
-    *lost = false;
-    return false;
+    if (!g) {
+        *lost = false;
+        return false;
+    }
+    return g->ops->target(g, w, h, lost);
 }
 
 bool ati_r350_gl_seed(R350GlCtx *g, int x0, int y0, int w, int h,
                       const uint8_t *base, unsigned pitch, unsigned xr)
 {
-    return false;
+    return g && g->ops->seed(g, x0, y0, w, h, base, pitch, xr);
 }
 
 bool ati_r350_gl_fetch(R350GlCtx *g, int x0, int y0, int w, int h,
                        uint8_t *base, unsigned pitch, unsigned xr)
 {
-    return false;
+    return g && g->ops->fetch(g, x0, y0, w, h, base, pitch, xr);
 }
 
 bool ati_r350_gl_draw(R350GlCtx *g, const R350GlReq *req)
 {
-    return false;
+    return g && g->ops->draw(g, req);
 }
 
 const char *ati_r350_gl_describe(R350GlCtx *g)
 {
-    return "none";
+    return g ? g->ops->describe(g) : "none";
 }
 
 void ati_r350_gl_prog_stats(R350GlCtx *g, uint64_t *hits, uint64_t *links,
                             uint64_t *failed)
 {
-    *hits = *links = *failed = 0;
+    if (!g) {
+        *hits = *links = *failed = 0;
+        return;
+    }
+    g->ops->prog_stats(g, hits, links, failed);
 }
-
-#endif /* CONFIG_DARWIN || _WIN32 */

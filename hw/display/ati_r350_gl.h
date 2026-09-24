@@ -6,9 +6,12 @@
  * a request is plain data, the backend keeps no device state, and the
  * three entry points below are the only ones the device calls. That is
  * what lets phase 2's milestone M3 move the backend onto its own thread
- * -- a request is already everything a worker needs -- and what lets a
- * Metal or SDL_GPU implementation replace ati_r350_gl.c without the
- * draw path noticing.
+ * -- a request is already everything a worker needs -- and what let a
+ * Metal implementation (ati_r350_metal.m) sit beside the GL one
+ * (ati_r350_gl.c) without the draw path noticing: both fill in the
+ * R350GlOps table at the end of this header, and the entry points the
+ * device calls dispatch through it. Which one a device gets is its
+ * "gl-backend" property, resolved once in ati_r350_gl_open().
  *
  * Coordinates in a request are the device's own: y increases downward
  * and the origin is the render target's top-left corner. The backend
@@ -218,11 +221,14 @@ typedef struct R350GlReq {
 typedef struct R350GlCtx R350GlCtx;
 
 /*
- * Create a backend. Returns NULL and points *err at a static reason
- * string on failure -- a host without a usable GL context is a
+ * Create a backend. `backend` is the device's "gl-backend" property:
+ * "auto" (or NULL) takes the first implementation this host can open in
+ * the order ati_r350_gl.c lists them, and a name ("opengl", "metal")
+ * takes exactly that one. Returns NULL and points *err at a static
+ * reason string on failure -- a host without a usable GL context is a
  * configuration fact to report, not an abort.
  */
-R350GlCtx *ati_r350_gl_open(const char **err);
+R350GlCtx *ati_r350_gl_open(const char *backend, const char **err);
 void ati_r350_gl_close(R350GlCtx *g);
 
 /*
@@ -260,5 +266,47 @@ const char *ati_r350_gl_describe(R350GlCtx *g);
 /* the fragment-shader cache: hits, links, and programs that would not build */
 void ati_r350_gl_prog_stats(R350GlCtx *g, uint64_t *hits, uint64_t *links,
                             uint64_t *failed);
+
+/*
+ * THE IMPLEMENTATIONS. Everything above is what the device sees; this
+ * is what a backend provides. One table per implementation, each entry
+ * the counterpart of the function of the same name above, with the
+ * same contract to the letter -- the entry points are only a dispatch
+ * through it. `open` returns a context whose FIRST member is an
+ * R350GlCtx naming the table it came from, which is how the dispatch
+ * finds its way back and the only thing the contract knows about a
+ * backend's private state.
+ *
+ * The comments that justify the contract -- the integer colour buffer,
+ * the shader-side blend, the host-built k/255 table, the flat
+ * per-triangle attributes -- are in ati_r350_gl.c, and a second
+ * implementation reproduces them rather than reasoning about them
+ * afresh: they are MEASUREMENTS against the software rasterizer, and
+ * a backend that departs from them is one that gl=verify will score
+ * worse.
+ */
+typedef struct R350GlOps {
+    const char *name;           /* what "gl-backend" calls it */
+    R350GlCtx *(*open)(const char **err);
+    void (*close)(R350GlCtx *g);
+    bool (*target)(R350GlCtx *g, int w, int h, bool *lost);
+    bool (*seed)(R350GlCtx *g, int x0, int y0, int w, int h,
+                 const uint8_t *base, unsigned pitch, unsigned xr);
+    bool (*fetch)(R350GlCtx *g, int x0, int y0, int w, int h,
+                  uint8_t *base, unsigned pitch, unsigned xr);
+    bool (*draw)(R350GlCtx *g, const R350GlReq *req);
+    const char *(*describe)(R350GlCtx *g);
+    void (*prog_stats)(R350GlCtx *g, uint64_t *hits, uint64_t *links,
+                       uint64_t *failed);
+} R350GlOps;
+
+struct R350GlCtx {
+    const R350GlOps *ops;
+};
+
+#ifdef CONFIG_DARWIN
+/* ati_r350_metal.m: Metal, offscreen, darwin only */
+extern const R350GlOps r350_mtl_ops;
+#endif
 
 #endif /* ATI_R350_GL_H */

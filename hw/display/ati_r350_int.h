@@ -595,9 +595,11 @@ struct ATIR350State {
      * unless a backend was actually opened -- that pointer is the only
      * thing the draw path tests, so a device left at the default is
      * untouched by any of this. See ati_r350_gl.h for the backend
-     * interface and ati_r350_gl.c for the GL implementation of it.
+     * interface, ati_r350_gl.c for the GL implementation of it and
+     * ati_r350_metal.m for the Metal one; `gl_backend_path` picks.
      */
     char *gl_path;
+    char *gl_backend_path;      /* "gl-backend": auto, opengl or metal */
     ATIR350GlMode gl_mode;
     struct R350GlCtx *gl_ctx;
     uint64_t gl_drawn;          /* draws the backend rendered */
